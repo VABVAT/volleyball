@@ -16,7 +16,7 @@ Production-style reference: **Kafka**, **Redis** projection + idempotency, **Pos
 ## Prerequisites
 
 - Docker Compose v2 (`docker compose`, not `docker -f`)
-- Ports: 2181, 4317, 5432, 6379, 8080, 8081, 8002, 8004, 8005, 8006, 8501, 9092, 9094, 16686 (Jaeger UI)
+- Ports: 4317, 5432, 6379, 8080, 8081, 8002, 8004, 8005, 8006, 8501, 9092, 9094, 16686 (Jaeger UI)
 
 ## Run locally
 
