@@ -20,8 +20,6 @@ async def redis_get_user(redis: Redis, user_id: int) -> dict[str, Any] | None:
     raw = await redis.get(user_profile_key(user_id))
     if not raw:
         return None
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8")
     return json.loads(raw)
 
 

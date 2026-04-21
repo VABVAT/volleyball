@@ -2,34 +2,31 @@
 # Usage: from repo root: docker compose -f infra/docker-compose.yml up --build
 
 services:
-  zookeeper:
-    image: bitnami/zookeeper:3.9.2
-    environment:
-      ALLOW_ANONYMOUS_LOGIN: "yes"
-    ports:
-      - "2181:2181"
-    volumes:
-      - zookeeper_data:/bitnami/zookeeper
-
   kafka:
-    image: bitnami/kafka:3.7.0
-    depends_on:
-      - zookeeper
+    image: apache/kafka:3.8.0
     ports:
       - "9092:9092"
       - "9094:9094"
     environment:
-      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
-      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:9094
-      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
-      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
-      ALLOW_PLAINTEXT_LISTENER: "yes"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
     volumes:
-      - kafka_data:/bitnami/kafka
+      - kafka_data:/var/lib/kafka/data
 
   kafka-init:
-    image: bitnami/kafka:3.7.0
+    image: apache/kafka:3.8.0
     depends_on:
       - kafka
     entrypoint: ["/bin/bash", "-c"]
@@ -38,11 +35,11 @@ services:
         set -e
         echo "Waiting for Kafka..."
         for i in $$(seq 1 60); do
-          /opt/bitnami/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 && break
+          /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 && break
           sleep 2
         done
         for topic in raw-events user-updates enriched-events retry-events dead-letter-queue; do
-          /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic $$topic --partitions 3 --replication-factor 1
+          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic $$topic --partitions 3 --replication-factor 1
         done
         echo "Topics ready."
 
@@ -174,7 +171,6 @@ services:
       - "8501:8501"
 
 volumes:
-  zookeeper_data:
   kafka_data:
   redis_data:
   dlq_data:

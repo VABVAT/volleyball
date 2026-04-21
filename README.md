@@ -15,7 +15,7 @@ Production-style reference implementation: **Kafka** for transport, **Redis** fo
 ## Prerequisites
 
 - Docker with Compose v2
-- Ports free: 2181, 6379, 8080, 8002, 8004, 8005, 8501, 9092, 9094
+- Ports free: 6379, 8080, 8002, 8004, 8005, 8501, 9092, 9094
 
 ## Run locally
 

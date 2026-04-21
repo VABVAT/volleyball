@@ -6,6 +6,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY shared /app/shared
+COPY services/__init__.py /app/services/__init__.py
 COPY services/user_service /app/services/user_service
 
 ENV PYTHONPATH=/app
