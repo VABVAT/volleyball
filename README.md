@@ -14,16 +14,143 @@ Production-style reference implementation: **Kafka** for transport, **Redis** fo
 
 ## Prerequisites
 
-- Docker with Compose v2
-- Ports free: 2181, 6379, 8080, 8002, 8004, 8005, 8501, 9092, 9094
+- **All-in-Docker:** Docker with Compose v2 (command is `docker compose`, not `docker -f`; see [Docker note](#docker-compose-cli) below)
+- **Native apps:** Python 3.12+, a running **Kafka** broker, **Redis**, and open ports (see below)
 
-## Run locally
+## Run locally (Docker Compose)
 
 From the repository root:
 
 ```bash
 docker compose -f infra/docker-compose.yml up --build
 ```
+
+### Docker Compose CLI
+
+If you see `unknown shorthand flag: 'f' in -f`, you likely ran `docker -f ...` by mistake. The Compose file flag belongs to the **`compose`** subcommand:
+
+```bash
+docker compose -f infra/docker-compose.yml up --build
+```
+
+If your install only has the legacy binary, use:
+
+```bash
+docker-compose -f infra/docker-compose.yml up --build
+```
+
+## Run without Docker (native processes)
+
+You still need **Kafka** and **Redis** running on your machine (install via Homebrew, tarballs, or another package manager). This repo assumes a single Kafka bootstrap like **`localhost:9092`** for local tools.
+
+### 1. Install Python dependencies
+
+```bash
+cd /path/to/volleyball
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+export PYTHONPATH="$PWD"    # repo root on PYTHONPATH
+```
+
+### 2. Start Redis
+
+Example (Homebrew):
+
+```bash
+brew install redis
+brew services start redis
+# or: redis-server
+```
+
+Default URL used below: `redis://127.0.0.1:6379/0`.
+
+### 3. Start Kafka and create topics
+
+Use your install’s `kafka-topics.sh` (path varies). Create the same topics as Compose (3 partitions, RF 1 is fine for local dev):
+
+```bash
+export KAFKA_BOOTSTRAP=localhost:9092   # adjust to your broker
+
+for topic in raw-events user-updates enriched-events retry-events dead-letter-queue; do
+  kafka-topics.sh --create --if-not-exists \
+    --bootstrap-server "$KAFKA_BOOTSTRAP" \
+    --topic "$topic" --partitions 3 --replication-factor 1
+done
+```
+
+If auto-creation is enabled and you accept defaults, you can skip this step, but explicit topics avoid surprises.
+
+### 4. Environment (all services)
+
+In **each** terminal, set the repo root on `PYTHONPATH` and point everything at localhost:
+
+```bash
+export PYTHONPATH="/path/to/volleyball"
+export KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+export REDIS_URL=redis://127.0.0.1:6379/0
+export USER_SERVICE_URL=http://127.0.0.1:8080
+```
+
+Optional: `export DLQ_STORAGE_PATH=/tmp/dlq_store.jsonl`
+
+### 5. Start services (order matters)
+
+Use **separate terminals** from the repo root (with venv activated and `PYTHONPATH` set).
+
+1. **User service** (must be up before the stream processor so HTTP fallback works; it also seeds `user-updates` on startup):
+
+   ```bash
+   python -m uvicorn services.user_service.main:app --host 0.0.0.0 --port 8080
+   ```
+
+2. **Stream processor** (consumer):
+
+   ```bash
+   export METRICS_PORT=8002
+   python -m services.consumer.main
+   ```
+
+3. **Retry worker:**
+
+   ```bash
+   export METRICS_PORT=8004
+   python -m services.retry_worker.main
+   ```
+
+4. **DLQ handler:**
+
+   ```bash
+   export METRICS_PORT=8005
+   python -m services.dlq_handler.main
+   ```
+
+5. **Producer** (mock traffic):
+
+   ```bash
+   python -m services.producer.main
+   ```
+
+6. **Dashboard** (optional):
+
+   ```bash
+   export METRICS_STREAM_PROCESSOR=http://127.0.0.1:8002
+   export METRICS_RETRY_WORKER=http://127.0.0.1:8004
+   export METRICS_DLQ_HANDLER=http://127.0.0.1:8005
+   export METRICS_USER_SERVICE=http://127.0.0.1:8080
+   streamlit run dashboard/app.py --server.port 8501
+   ```
+
+### 6. Verify
+
+- User service: `curl -s http://127.0.0.1:8080/health`
+- Stream processor: `curl -s http://127.0.0.1:8002/metrics | head`
+
+Use `scripts/demo.sh` with `USER_SERVICE_URL=http://127.0.0.1:8080` and load simulation with `KAFKA_BOOTSTRAP_SERVERS=localhost:9092` (match your broker).
+
+### Hybrid (optional)
+
+You can run **only Redis + Kafka** in Docker and still run all Python services natively with `KAFKA_BOOTSTRAP_SERVERS=localhost:9094` (or whatever port you map) and the same commands as above.
 
 Services:
 
