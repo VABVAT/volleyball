@@ -1,0 +1,12 @@
+# Core stack (all Python services)
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+aiokafka==0.11.0
+redis[hiredis]==5.2.1
+httpx==0.28.1
+pydantic==2.10.3
+pydantic-settings==2.6.1
+prometheus-client==0.21.1
+cachetools==5.5.0
+structlog==24.4.0
+streamlit==1.41.1

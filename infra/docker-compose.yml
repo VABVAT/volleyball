@@ -1,0 +1,180 @@
+# Kafka event enrichment pipeline — full stack
+# Usage: from repo root: docker compose -f infra/docker-compose.yml up --build
+
+services:
+  zookeeper:
+    image: bitnami/zookeeper:3.9.2
+    environment:
+      ALLOW_ANONYMOUS_LOGIN: "yes"
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+
+  kafka:
+    image: bitnami/kafka:3.7.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    volumes:
+      - kafka_data:/bitnami/kafka
+
+  kafka-init:
+    image: bitnami/kafka:3.7.0
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        echo "Waiting for Kafka..."
+        for i in $$(seq 1 60); do
+          /opt/bitnami/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 && break
+          sleep 2
+        done
+        for topic in raw-events user-updates enriched-events retry-events dead-letter-queue; do
+          /opt/bitnami/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic $$topic --partitions 3 --replication-factor 1
+        done
+        echo "Topics ready."
+
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+  user-service:
+    build:
+      context: ..
+      dockerfile: services/user_service/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      USER_SERVICE_PORT: "8080"
+      USER_SERVICE_HOST: "0.0.0.0"
+      LOG_LEVEL: INFO
+    ports:
+      - "8080:8080"
+
+  producer:
+    build:
+      context: ..
+      dockerfile: services/producer/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PRODUCER_INTERVAL_SEC: "0.15"
+      DUPLICATE_EVERY_N: "12"
+      LOG_LEVEL: INFO
+
+  stream-processor:
+    build:
+      context: ..
+      dockerfile: services/consumer/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+      user-service:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_URL: redis://redis:6379/0
+      USER_SERVICE_URL: http://user-service:8080
+      METRICS_PORT: "8002"
+      USER_HTTP_RETRIES: "3"
+      LOG_LEVEL: INFO
+    ports:
+      - "8002:8002"
+
+  retry-worker:
+    build:
+      context: ..
+      dockerfile: services/retry_worker/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+      user-service:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_URL: redis://redis:6379/0
+      USER_SERVICE_URL: http://user-service:8080
+      METRICS_PORT: "8004"
+      MAX_RETRY_ATTEMPTS: "3"
+      LOG_LEVEL: INFO
+    ports:
+      - "8004:8004"
+
+  dlq-handler:
+    build:
+      context: ..
+      dockerfile: services/dlq_handler/Dockerfile
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      REDIS_URL: redis://redis:6379/0
+      METRICS_PORT: "8005"
+      DLQ_STORAGE_PATH: /data/dlq_store.jsonl
+      LOG_LEVEL: INFO
+    volumes:
+      - dlq_data:/data
+    ports:
+      - "8005:8005"
+
+  dashboard:
+    build:
+      context: ..
+      dockerfile: dashboard/Dockerfile
+    depends_on:
+      - stream-processor
+      - retry-worker
+      - dlq-handler
+      - user-service
+    environment:
+      METRICS_STREAM_PROCESSOR: http://stream-processor:8002
+      METRICS_RETRY_WORKER: http://retry-worker:8004
+      METRICS_DLQ_HANDLER: http://dlq-handler:8005
+      METRICS_USER_SERVICE: http://user-service:8080
+    ports:
+      - "8501:8501"
+
+volumes:
+  zookeeper_data:
+  kafka_data:
+  redis_data:
+  dlq_data:
