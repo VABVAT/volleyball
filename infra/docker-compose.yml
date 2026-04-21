@@ -56,6 +56,12 @@ services:
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     ports:
       - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
 
   jaeger:
     image: jaegertracing/all-in-one:1.60
@@ -72,7 +78,7 @@ services:
       POSTGRES_PASSWORD: pipeline
       POSTGRES_DB: pipeline
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
@@ -114,7 +120,7 @@ services:
       kafka:
         condition: service_started
       schema-registry:
-        condition: service_started
+        condition: service_healthy
       jaeger:
         condition: service_started
     environment:
@@ -140,7 +146,7 @@ services:
       user-service:
         condition: service_started
       schema-registry:
-        condition: service_started
+        condition: service_healthy
       jaeger:
         condition: service_started
     environment:
@@ -171,7 +177,7 @@ services:
       user-service:
         condition: service_started
       schema-registry:
-        condition: service_started
+        condition: service_healthy
       jaeger:
         condition: service_started
     environment:
@@ -225,7 +231,7 @@ services:
       postgres:
         condition: service_started
       schema-registry:
-        condition: service_started
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       DATABASE_URL: postgresql+asyncpg://pipeline:pipeline@postgres:5432/pipeline
