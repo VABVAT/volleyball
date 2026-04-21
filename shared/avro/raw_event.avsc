@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "RawEvent",
+  "namespace": "com.pipeline",
+  "fields": [
+    {"name": "eventId", "type": "string"},
+    {"name": "userId", "type": "int"},
+    {"name": "action", "type": "string"}
+  ]
+}

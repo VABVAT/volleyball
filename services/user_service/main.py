@@ -1,8 +1,6 @@
 """
 User Service: HTTP lookup API + publisher of user snapshots to `user-updates`.
-
-Seeded users are pushed to Kafka on startup so the stream processor can hydrate
-its local store without per-event fan-out. Ad-hoc updates use PUT and re-publish.
+Users are stored in PostgreSQL (async SQLAlchemy); seeded on first boot.
 """
 
 from __future__ import annotations
@@ -19,6 +17,9 @@ from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI, HTTPException
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import Integer, String, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from starlette.responses import PlainTextResponse
 
 from shared.kafka_topics import USER_UPDATES
@@ -40,18 +41,28 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
     kafka_bootstrap_servers: str = "localhost:9092"
+    database_url: str = "postgresql+asyncpg://pipeline:pipeline@localhost:5432/pipeline"
 
 
 settings = Settings()
-producer: AIOKafkaProducer | None = None
+engine = create_async_engine(settings.database_url, echo=False)
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
-# In-memory authoritative store for demo (could be Postgres)
-USERS: dict[int, UserProfile] = {
-    1: UserProfile(userId=1, name="Alice", email="alice@example.com", tier="pro"),
-    2: UserProfile(userId=2, name="Bob", email="bob@example.com", tier="standard"),
-    3: UserProfile(userId=3, name="Carol", email="carol@example.com", tier="standard"),
-    123: UserProfile(userId=123, name="Demo", email="demo@example.com", tier="pro"),
-}
+
+class Base(DeclarativeBase):
+    pass
+
+
+class UserRow(Base):
+    __tablename__ = "users"
+
+    user_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    email: Mapped[str] = mapped_column(String(255))
+    tier: Mapped[str] = mapped_column(String(64), default="standard")
+
+
+producer: AIOKafkaProducer | None = None
 
 HTTP_REQUESTS = Counter(
     "user_service_http_requests_total", "HTTP requests", ["method", "path", "status"]
@@ -76,8 +87,11 @@ async def get_producer() -> AIOKafkaProducer:
     return producer
 
 
+def row_to_profile(row: UserRow) -> UserProfile:
+    return UserProfile(userId=row.user_id, name=row.name, email=row.email, tier=row.tier)
+
+
 async def publish_user_update(profile: UserProfile) -> None:
-    """Publish full user snapshot to Kafka for local replicas."""
     p = await get_producer()
     body = UserUpdateMessage(user=profile).model_dump(by_alias=True)
     await p.send_and_wait(USER_UPDATES, value=body)
@@ -85,21 +99,41 @@ async def publish_user_update(profile: UserProfile) -> None:
     log.info("published_user_update", user_id=profile.user_id)
 
 
-async def seed_kafka() -> None:
-    for uid in sorted(USERS.keys()):
-        await publish_user_update(USERS[uid])
+async def seed_db_and_kafka() -> None:
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with SessionLocal() as session:
+        exists = (await session.execute(select(UserRow).limit(1))).first()
+        if exists is None:
+            seed = [
+                UserRow(user_id=1, name="Alice", email="alice@example.com", tier="pro"),
+                UserRow(user_id=2, name="Bob", email="bob@example.com", tier="standard"),
+                UserRow(user_id=3, name="Carol", email="carol@example.com", tier="standard"),
+                UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro"),
+            ]
+            session.add_all(seed)
+            await session.commit()
+            log.info("seeded_users", count=len(seed))
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(UserRow).order_by(UserRow.user_id))
+        rows = result.scalars().all()
+        for row in rows:
+            await publish_user_update(row_to_profile(row))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("user_service_starting", kafka=settings.kafka_bootstrap_servers)
     await get_producer()
-    await seed_kafka()
+    await seed_db_and_kafka()
     yield
     global producer
     if producer:
         await producer.stop()
         producer = None
+    await engine.dispose()
     log.info("user_service_stopped")
 
 
@@ -131,41 +165,55 @@ async def metrics():
 
 @app.get("/user/{user_id}")
 async def get_user(user_id: int):
-    """
-    Primary read path for rare fallback when the stream processor's local store
-    misses a user (cold start, replication lag, or new user).
-    """
-    if user_id not in USERS:
-        raise HTTPException(status_code=404, detail="user not found")
-    return USERS[user_id].model_dump(by_alias=True)
+    async with SessionLocal() as session:
+        row = await session.get(UserRow, user_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="user not found")
+        return row_to_profile(row).model_dump(by_alias=True)
 
 
 @app.put("/user/{user_id}")
 async def upsert_user(user_id: int, body: dict[str, Any]):
-    """Update user and push snapshot to Kafka so replicas converge."""
     name = str(body.get("name", f"User-{user_id}"))
     email = str(body.get("email", f"user{user_id}@example.com"))
     tier = str(body.get("tier", "standard"))
-    profile = UserProfile(userId=user_id, name=name, email=email, tier=tier)
-    USERS[user_id] = profile
+    async with SessionLocal() as session:
+        row = await session.get(UserRow, user_id)
+        if row is None:
+            row = UserRow(user_id=user_id, name=name, email=email, tier=tier)
+            session.add(row)
+        else:
+            row.name = name
+            row.email = email
+            row.tier = tier
+        await session.commit()
+        profile = row_to_profile(row)
     await publish_user_update(profile)
     return profile.model_dump(by_alias=True)
 
 
 @app.post("/admin/simulate-down")
 async def simulate_down():
-    """
-    Demo hook: remove user 123 from memory so fallback/API fails until restored.
-    Used to exercise retry + DLQ without stopping the container.
-    """
-    USERS.pop(123, None)
-    return {"ok": True, "message": "user 123 removed from memory (simulate missing user)"}
+    async with SessionLocal() as session:
+        row = await session.get(UserRow, 123)
+        if row:
+            await session.delete(row)
+            await session.commit()
+    return {"ok": True, "message": "user 123 removed from database (simulate missing user)"}
 
 
 @app.post("/admin/restore-user-123")
 async def restore_user_123():
-    p = UserProfile(userId=123, name="Demo", email="demo@example.com", tier="pro")
-    USERS[123] = p
-    await publish_user_update(p)
-    return {"ok": True, "user": p.model_dump(by_alias=True)}
-
+    async with SessionLocal() as session:
+        row = await session.get(UserRow, 123)
+        if row is None:
+            row = UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro")
+            session.add(row)
+        else:
+            row.name = "Demo"
+            row.email = "demo@example.com"
+            row.tier = "pro"
+        await session.commit()
+        profile = row_to_profile(row)
+    await publish_user_update(profile)
+    return {"ok": True, "user": profile.model_dump(by_alias=True)}

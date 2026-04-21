@@ -67,6 +67,8 @@ class RetryEnvelope(BaseModel):
     attempt: int = 1
     last_error: str | None = None
     trace_id: str | None = None
+    # Unix timestamp (seconds); process only when time.time() >= retry_after (0 = immediate)
+    retry_after: float = 0.0
 
 
 class DeadLetterRecord(BaseModel):

@@ -10,3 +10,8 @@ prometheus-client==0.21.1
 cachetools==5.5.0
 structlog==24.4.0
 streamlit==1.41.1
+fastavro>=1.11.0
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+opentelemetry-sdk==1.28.0
+opentelemetry-exporter-otlp-proto-grpc==1.28.0

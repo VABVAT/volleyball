@@ -4,22 +4,64 @@ from __future__ import annotations
 
 import json
 import random
+import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import structlog
+from prometheus_client import Gauge
 from redis.asyncio import Redis
 
 from shared.redis_keys import user_profile_key
-from shared.schemas import RawEvent, UserProfile
+from shared.schemas import UserProfile
 
 log = structlog.get_logger()
+
+CIRCUIT_OPEN = Gauge(
+    "user_service_circuit_breaker_open",
+    "1 if HTTP circuit breaker to User Service is open",
+)
+
+
+@dataclass
+class CircuitBreaker:
+    failure_threshold: int = 5
+    cooldown_sec: float = 30.0
+    _failures: int = 0
+    _opened_at: float = 0.0
+
+    def is_open(self) -> bool:
+        if self._opened_at and time.monotonic() - self._opened_at < self.cooldown_sec:
+            CIRCUIT_OPEN.set(1.0)
+            return True
+        if self._opened_at:
+            self._opened_at = 0.0
+            self._failures = 0
+        CIRCUIT_OPEN.set(0.0)
+        return False
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.failure_threshold:
+            self._opened_at = time.monotonic()
+            CIRCUIT_OPEN.set(1.0)
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._opened_at = 0.0
+        CIRCUIT_OPEN.set(0.0)
+
+
+user_service_cb = CircuitBreaker()
 
 
 async def redis_get_user(redis: Redis, user_id: int) -> dict[str, Any] | None:
     raw = await redis.get(user_profile_key(user_id))
     if not raw:
         return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8")
     return json.loads(raw)
 
 
@@ -35,7 +77,12 @@ async def fetch_user_http(
 ) -> UserProfile | None:
     """
     Rare fallback: call User Service with bounded retries and exponential backoff.
+    Uses a circuit breaker to avoid hammering a failed upstream.
     """
+    if user_service_cb.is_open():
+        log.warning("circuit_breaker_open", user_id=user_id)
+        return None
+
     url = f"{base_url.rstrip('/')}/user/{user_id}"
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
@@ -43,10 +90,13 @@ async def fetch_user_http(
             r = await client.get(url, timeout=5.0)
             if r.status_code == 404:
                 log.warning("user_not_found_http", user_id=user_id)
+                user_service_cb.record_success()
                 return None
             r.raise_for_status()
             data = r.json()
-            return UserProfile.model_validate(data)
+            prof = UserProfile.model_validate(data)
+            user_service_cb.record_success()
+            return prof
         except Exception as e:
             last_exc = e
             if attempt >= max_retries:
@@ -63,6 +113,7 @@ async def fetch_user_http(
 
             await asyncio.sleep(delay)
     log.error("user_http_failed", user_id=user_id, error=str(last_exc))
+    user_service_cb.record_failure()
     return None
 
 
@@ -78,8 +129,6 @@ async def resolve_user(
     """
     Returns (user_dict, error_reason). user_dict None means unresolved.
     """
-    import time
-
     now = time.monotonic()
     if local_cache is not None and user_id in local_cache:
         data, exp = local_cache[user_id]

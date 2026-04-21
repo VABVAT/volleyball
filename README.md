@@ -1,92 +1,88 @@
 # Kafka Event Enrichment Pipeline
 
-Production-style reference implementation: **Kafka** for transport, **Redis** for idempotency + a **local user projection** hydrated from `user-updates`, **FastAPI/asyncio** services, **retry** + **DLQ**, **Prometheus** metrics, optional **Streamlit** dashboard, and **Docker Compose**.
+Production-style reference: **Kafka**, **Redis** projection + idempotency, **PostgreSQL** for users and enriched results, **Confluent Schema Registry** + **Avro** payloads, **Kafka transactions (EOS)** for produce + offset commit, **consumer lag** metrics, **OpenTelemetry** → **Jaeger**, **circuit breaker** on User Service HTTP, **non-blocking retry** (`retry_after`), **DLQ replay** API, and **Streamlit** dashboard.
 
 ## Architecture
 
-1. **Producer** → `raw-events`
-2. **User Service** → publishes full user snapshots to `user-updates` (and serves rare `GET /user/{id}` fallback)
-3. **Stream processor** consumes `raw-events` + `user-updates`, updates Redis, enriches, writes `enriched-events` or `retry-events`
-4. **Retry worker** consumes `retry-events`, exponential backoff, max attempts → `dead-letter-queue`
-5. **DLQ handler** persists DLQ records (JSONL) and increments Redis stats
+1. **Producer** → `raw-events` (W3C trace context in headers when OTLP is configured)
+2. **User Service** → Postgres + publishes snapshots to `user-updates`
+3. **Stream processor** → `raw-events` + `user-updates` → Redis → `enriched-events` or `retry-events` (transactional EOS optional)
+4. **Retry worker** → `retry-events` → backoff via `retry_after` republish → `enriched-events` or DLQ
+5. **Result service** → consumes `enriched-events` with **`isolation_level=read_committed`** → Postgres `enriched_results`
+6. **DLQ handler** → persists DLQ JSONL, **`POST /replay`** back to `raw-events`
 
-**Horizontal scaling:** Run multiple instances of `stream-processor` and `retry-worker` with the same consumer group id (already set in code). For Compose, omit fixed host ports when scaling (or use one replica locally).
+**Horizontal scaling:** use a **unique** `KAFKA_TRANSACTIONAL_ID` / hostname per `stream-processor` replica. For Compose, `docker compose up --scale stream-processor=2` requires removing conflicting host port mappings for that service.
 
 ## Prerequisites
 
-- Docker with Compose v2
-- Ports free: 6379, 8080, 8002, 8004, 8005, 8501, 9092, 9094
+- Docker Compose v2 (`docker compose`, not `docker -f`)
+- Ports: 2181, 4317, 5432, 6379, 8080, 8081, 8002, 8004, 8005, 8006, 8501, 9092, 9094, 16686 (Jaeger UI)
 
 ## Run locally
-
-From the repository root:
 
 ```bash
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-Services:
+| Service           | Port | Notes |
+|-------------------|------|--------|
+| Postgres          | 5432 | DB `pipeline`, user `pipeline` / `pipeline` |
+| Schema Registry   | 8081 | Avro subjects |
+| Jaeger UI         | 16686 | Traces (OTLP gRPC 4317) |
+| Redis             | 6379 | |
+| User Service      | 8080 | |
+| Stream processor  | 8002 | Lag + circuit metrics |
+| Retry worker      | 8004 | |
+| DLQ handler       | 8005 | `POST /replay` |
+| Result service    | 8006 | `GET /results`, `/results/stats` |
+| Dashboard         | 8501 | Lag panels, DLQ replay, result table |
 
-| Service           | Port (host) | Role                                      |
-|------------------|-------------|-------------------------------------------|
-| Kafka (internal) | 9092        | In-docker bootstrap                       |
-| Kafka (external) | 9094        | Host tools / load sim                     |
-| Redis            | 6379        | Idempotency + user projection             |
-| User Service     | 8080        | `GET /user/{id}`, admin demo endpoints    |
-| Stream processor | 8002        | `/metrics`, `/health`                     |
-| Retry worker     | 8004        | `/metrics`, `/health`                     |
-| DLQ handler      | 8005        | `/metrics`, `/health`                     |
-| Dashboard        | 8501        | Streamlit                                 |
+### Environment highlights
+
+| Variable | Purpose |
+|----------|---------|
+| `KAFKA_ENABLE_TXN` | `1` = transactional producer + `send_offsets_to_transaction` (default in Compose) |
+| `KAFKA_TRANSACTIONAL_ID` | Unique per process; default `stream-processor-txn-{hostname}` |
+| `KAFKA_USE_AVRO` | `1` = Confluent wire format + Schema Registry |
+| `SCHEMA_REGISTRY_URL` | e.g. `http://schema-registry:8081` |
+| `DATABASE_URL` | Async SQLAlchemy + asyncpg |
+| `OTLP_ENDPOINT` | e.g. `jaeger:4317` — if unset, tracing is a no-op |
 
 ## Demo scenarios
-
-With the stack running:
 
 ```bash
 chmod +x scripts/demo.sh
 USER_SERVICE_URL=http://localhost:8080 ./scripts/demo.sh
 ```
 
-1. **Normal flow** — producer emits events; user data is served from Redis after `user-updates` replication.
-2. **Duplicates** — producer periodically reuses the same `eventId`; duplicates are skipped via Redis idempotency.
-3. **User Service “down” for a user** — `POST /admin/simulate-down` removes user `123` from memory so HTTP fallback fails; events for that user move through `retry-events` and eventually **DLQ** if still unresolved.
-4. **Restore** — `POST /admin/restore-user-123` republishes the user to `user-updates` so enrichment succeeds again.
+1. **Normal flow** — events land in **Result service** (`/results`) and the dashboard table.
+2. **Duplicates** — same `eventId` skipped via Redis idempotency.
+3. **Failure** — `POST /admin/simulate-down` deletes user `123` from Postgres; unresolved events → retry → DLQ.
+4. **Replay** — Dashboard **“Replay DLQ”** or `curl -X POST http://localhost:8005/replay?limit=100`.
+5. **Traces** — Open [Jaeger UI](http://localhost:16686) and search by service (`producer`, `stream-processor`, …).
 
 ## Load simulation
-
-Install deps locally (or run in a throwaway container with the same image as producer):
 
 ```bash
 export PYTHONPATH=.
 export KAFKA_BOOTSTRAP_SERVERS=localhost:9094
-export LOAD_RATE_PER_SEC=500
-export LOAD_DURATION_SEC=15
 python scripts/load_sim.py
 ```
-
-## Observability
-
-- Prometheus text on each service’s `/metrics`.
-- Streamlit dashboard at `http://localhost:8501` polls those endpoints.
 
 ## Project layout
 
 ```
 infra/docker-compose.yml
-shared/                  # Schemas, topics, enrichment helpers
+shared/                  # Schemas, Avro, serde, tracing, lag helpers, enrichment + CB
 services/
-  producer/
-  consumer/              # Stream processor (core)
-  user_service/
-  retry_worker/
-  dlq_handler/
-dashboard/               # Streamlit
-scripts/                 # demo.sh, load_sim.py
+  producer/, consumer/, user_service/, retry_worker/, dlq_handler/, result_service/
+dashboard/
+scripts/
 ```
 
 ## Design notes
 
-- **No per-event User Service calls in the steady state:** enrichment reads Redis populated from `user-updates`. HTTP is only used when the projection misses a user.
-- **Idempotency:** Redis key `idem:{eventId}` set to `enriched` or `dlq` on terminal outcomes; duplicates are skipped.
-- **Offsets:** Kafka offsets committed only after successful handling of each message (manual commits).
-- **Retries:** Raw path emits `retry-events` with `attempt=1`; retry worker increments up to `MAX_RETRY_ATTEMPTS` (default 3) with exponential backoff, then DLQ.
+- **EOS:** Outbound writes + consumer offset for `raw-events` / `retry-events` share a Kafka transaction when `KAFKA_ENABLE_TXN=1`. Redis idempotency keys are set **after** a successful transaction commit.
+- **Result consumer** uses `read_committed` so it does not read aborted transactional messages.
+- **Retry:** `retry_after` schedules republish without blocking the consumer loop for the full backoff duration.
+- **Circuit breaker:** `user_service_circuit_breaker_open` gauge in Prometheus metrics (from shared enrichment module).
