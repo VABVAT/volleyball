@@ -27,4 +27,4 @@ echo "== Sample metrics (stream processor) =="
 curl -sf "http://localhost:8002/metrics" | head -n 40
 
 echo
-echo "Done. Open Streamlit at http://localhost:8501 if the dashboard container is running."
+echo "Done. Open the dashboard UI at http://localhost:8501 if the dashboard-ui container is running."
