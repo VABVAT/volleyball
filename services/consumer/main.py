@@ -63,6 +63,8 @@ TRANSACTIONAL_ID = os.getenv(
     "KAFKA_TRANSACTIONAL_ID",
     f"stream-processor-txn-{socket.gethostname()}",
 )
+# First hop to retry-events is not processed until this wall time (retry worker sleeps until then).
+RETRY_INITIAL_DELAY_SEC = float(os.getenv("RETRY_INITIAL_DELAY_SEC", "1.0"))
 
 tracer = init_tracer("stream-processor")
 
@@ -304,7 +306,7 @@ async def raw_events_loop() -> None:
                             attempt=1,
                             last_error=err,
                             trace_id=str(uuid.uuid4()),
-                            retry_after=0.0,
+                            retry_after=time.time() + RETRY_INITIAL_DELAY_SEC,
                         )
                         payload = json.dumps(env.model_dump(mode="json", by_alias=True)).encode("utf-8")
                         if KAFKA_ENABLE_TXN:

@@ -179,10 +179,10 @@ export function SimpleDashboard() {
             </li>
             <li>
               <span className="font-semibold">Retries chart</span> (derivative of{' '}
-              <code className="font-mono">retry_worker_messages_consumed_total</code>): each time the
-              retry worker consumes a message is one processing pass. While user 123 stays missing, the
-              worker requeues with backoff until <span className="font-semibold">up to 3 attempts</span>{' '}
-              (<code className="font-mono">MAX_RETRY_ATTEMPTS</code>), then DLQ.
+              <code className="font-mono">retry_worker_messages_consumed_total</code>): each consume is
+              one pass. The worker <span className="font-semibold">waits until</span>{' '}
+              <code className="font-mono">retry_after</code> (≥1s exponential backoff between attempts,
+              first hop delayed by the stream processor) instead of tight requeue loops.
             </li>
             <li>
               <span className="font-semibold">Errors chart</span> (sum of{' '}

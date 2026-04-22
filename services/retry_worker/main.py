@@ -57,6 +57,9 @@ TRANSACTIONAL_ID = os.getenv(
     "KAFKA_TRANSACTIONAL_ID",
     f"retry-worker-txn-{socket.gethostname()}",
 )
+# Backoff between worker passes (floor avoids tight Kafka republish loops under load).
+RETRY_MIN_BACKOFF_SEC = float(os.getenv("RETRY_MIN_BACKOFF_SEC", "1.0"))
+RETRY_MAX_BACKOFF_SEC = float(os.getenv("RETRY_MAX_BACKOFF_SEC", "120.0"))
 
 tracer = init_tracer("retry-worker")
 
@@ -82,6 +85,15 @@ http_client: httpx.AsyncClient | None = None
 txn_producer: AIOKafkaProducer | None = None
 _avro_enriched_parsed: dict[str, Any] | None = None
 _enriched_schema_id: int | None = None
+
+
+async def _sleep_until_retry_after(retry_after: float) -> None:
+    """Block this partition until retry_after; chunked sleeps so shutdown stays responsive."""
+    while time.time() < retry_after:
+        if shutdown_event.is_set():
+            raise asyncio.CancelledError()
+        remaining = retry_after - time.time()
+        await asyncio.sleep(min(max(remaining, 0.001), 1.0))
 
 
 async def get_redis() -> Redis:
@@ -168,12 +180,7 @@ async def handle_retry_message(
         env = RetryEnvelope.model_validate_json(msg.value)
         span.set_attribute("event.id", env.event.event_id)
 
-        now = time.time()
-        if env.retry_after and env.retry_after > now:
-            await producer.send_and_wait(RETRY_EVENTS, msg.value)
-            RETRY_REPUBLISH.inc()
-            log.info("retry_not_ready_requeued", event_id=env.event.event_id, retry_after=env.retry_after)
-            return
+        await _sleep_until_retry_after(env.retry_after)
 
         ikey = idempotency_key(env.event.event_id)
         state = await redis.get(ikey)
@@ -211,7 +218,11 @@ async def handle_retry_message(
             await redis.set(ikey, "dlq", ex=86400 * 7)
             return
 
-        delay = min(2**env.attempt, 60.0)
+        now = time.time()
+        delay = max(
+            RETRY_MIN_BACKOFF_SEC,
+            min(2.0**env.attempt, RETRY_MAX_BACKOFF_SEC),
+        )
         new_env = RetryEnvelope(
             event=env.event,
             attempt=env.attempt + 1,
