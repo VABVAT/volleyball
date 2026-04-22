@@ -6,8 +6,17 @@ import { SimpleLineChart, type SimplePoint } from '../../components/simple/Simpl
 import { SimpleStatCard } from '../../components/simple/SimpleStatCard'
 import type { RawSnapshot } from '../../api/types'
 
+/** Producer treats very large N as effectively no duplicates. */
+const DUPLICATE_OFF_EVERY_N = 1_000_000
+
 function enrichedTotal(snapshot: RawSnapshot | null): number {
   return snapshot?.sp.raw['stream_processor_enriched_events_total'] ?? 0
+}
+
+function sumStreamProcessorErrors(raw: Record<string, number>): number {
+  return Object.entries(raw)
+    .filter(([k]) => k.startsWith('stream_processor_errors_total'))
+    .reduce((acc, [, v]) => acc + (typeof v === 'number' ? v : 0), 0)
 }
 
 function pointsEnrichedEps(series: RawSnapshot[]): SimplePoint[] {
@@ -36,6 +45,21 @@ function pointsRawEventsEps(series: RawSnapshot[]): SimplePoint[] {
   })
 }
 
+function pointsCounterDerivativeEps(
+  series: RawSnapshot[],
+  getTotal: (raw: Record<string, number>) => number,
+): SimplePoint[] {
+  return series.map((s, i) => {
+    const prev = series[i - 1]
+    if (!prev || !s.sp.reachable || !prev.sp.reachable) return { t: s.ts, v: null }
+    const dt = s.ts - prev.ts
+    if (dt <= 0) return { t: s.ts, v: null }
+    const cur = getTotal(s.sp.raw)
+    const p = getTotal(prev.sp.raw)
+    return { t: s.ts, v: Math.max(0, (cur - p) / dt) }
+  })
+}
+
 export function SimpleDashboard() {
   const { data } = useCurrentMetrics(2000)
   const series = useTimeSeries(600, 3000)
@@ -45,14 +69,10 @@ export function SimpleDashboard() {
   const enriched = enrichedTotal(current)
   const duplicates = current?.sp.raw['stream_processor_duplicate_events_total'] ?? 0
   const retryOut = current?.sp.raw['stream_processor_retry_published_total'] ?? 0
-  const errorsTotal = useMemo(() => {
-    const raw = current?.sp.raw ?? {}
-    return Object.entries(raw)
-      .filter(([k]) => k.startsWith('stream_processor_errors_total'))
-      .reduce((acc, [, v]) => acc + (typeof v === 'number' ? v : 0), 0)
-  }, [current])
+  const errorsTotal = useMemo(() => sumStreamProcessorErrors(current?.sp.raw ?? {}), [current])
 
   const [eps, setEps] = useState<number>(20)
+  const [dupEnabled, setDupEnabled] = useState(false)
   const [everyN, setEveryN] = useState<number>(12)
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string>('')
@@ -64,7 +84,10 @@ export function SimpleDashboard() {
         const c = await api.producerControls()
         if (cancelled) return
         setEps(Math.round(c.speed.events_per_sec))
-        setEveryN(c.duplicates.duplicate_every_n)
+        const n = c.duplicates.duplicate_every_n
+        const on = n < DUPLICATE_OFF_EVERY_N / 2
+        setDupEnabled(on)
+        if (on) setEveryN(n)
       } catch {
         /* ignore */
       }
@@ -88,6 +111,15 @@ export function SimpleDashboard() {
 
   const epsPoints = useMemo(() => pointsEnrichedEps(series), [series])
   const rawEpsPoints = useMemo(() => pointsRawEventsEps(series), [series])
+  const retryEpsPoints = useMemo(
+    () =>
+      pointsCounterDerivativeEps(series, (raw) => raw['stream_processor_retry_published_total'] ?? 0),
+    [series],
+  )
+  const errorsEpsPoints = useMemo(
+    () => pointsCounterDerivativeEps(series, (raw) => sumStreamProcessorErrors(raw)),
+    [series],
+  )
 
   const fmt = (v: number | null, digits = 1) => (v == null ? '—' : v.toFixed(digits))
 
@@ -101,9 +133,17 @@ export function SimpleDashboard() {
       setMsg(`${label}: ${String(e)}`)
     } finally {
       setBusy(null)
-      setTimeout(() => setMsg(''), 2500)
+      setTimeout(() => setMsg(''), 3500)
     }
   }
+
+  const applyDuplicates = () =>
+    run('Duplicate settings', async () => {
+      const step = Math.floor(everyN)
+      const safe = Number.isFinite(step) && step >= 1 ? step : 12
+      const n = dupEnabled ? Math.min(1_000_000, safe) : DUPLICATE_OFF_EVERY_N
+      await api.setProducerDuplicates(n)
+    })
 
   return (
     <div className="space-y-4">
@@ -111,86 +151,113 @@ export function SimpleDashboard() {
         <div className="text-sm font-bold text-black">Pipeline Dashboard (simple)</div>
         <div className="text-xs text-black">
           Raw throughput uses stream-processor consumption (matches producer when the pipeline is
-          caught up). Refresh if you just started the stack.
+          caught up). Retries chart tracks events routed to the retry topic; errors chart sums
+          stream-processor error counters. Refresh if you just started the stack.
         </div>
       </div>
 
       <div className="border border-black bg-white p-3">
         <div className="text-sm font-semibold text-black">Controls</div>
-        <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
-          <div className="border border-black p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-black">Stream speed</div>
-            <div className="mt-2 flex items-center gap-3">
-              <input
-                type="range"
-                min={1}
-                max={1000}
-                value={eps}
-                onChange={(e) => setEps(Number(e.target.value))}
-                className="w-full"
-              />
-              <div className="w-16 text-right font-mono text-sm text-black">{eps} eps</div>
-            </div>
-            <button
-              disabled={busy !== null}
-              className="mt-2 border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-              onClick={() =>
-                run('Set speed', async () => {
-                  await api.setProducerSpeed(eps)
-                })
-              }
-            >
-              Apply
-            </button>
-          </div>
 
-          <div className="border border-black p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-black">Duplicates</div>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="text-sm text-black">Every</span>
-              <input
-                type="number"
-                min={1}
-                value={everyN}
-                onChange={(e) => setEveryN(Number(e.target.value))}
-                className="w-24 border border-black px-2 py-1 font-mono text-sm text-black"
-              />
-              <span className="text-sm text-black">events</span>
-            </div>
-            <button
-              disabled={busy !== null}
-              className="mt-2 border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-              onClick={() =>
-                run('Set duplicates', async () => {
-                  await api.setProducerDuplicates(everyN)
-                })
-              }
-            >
-              Apply
-            </button>
+        <div className="mt-2 border border-black p-3">
+          <div className="text-xs font-semibold uppercase tracking-wide text-black">Stream speed</div>
+          <div className="mt-2 flex items-center gap-3">
+            <input
+              type="range"
+              min={1}
+              max={1000}
+              value={eps}
+              onChange={(e) => setEps(Number(e.target.value))}
+              className="w-full"
+            />
+            <div className="w-20 shrink-0 text-right font-mono text-sm text-black">{eps} eps</div>
           </div>
-
-          <div className="border border-black p-3">
-            <div className="text-xs font-semibold uppercase tracking-wide text-black">Generate</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <button
-                disabled={busy !== null}
-                className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-                onClick={() => run('Simulate down', () => api.simulateDown())}
-              >
-                Simulate user down
-              </button>
-              <button
-                disabled={busy !== null}
-                className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-                onClick={() => run('Restore user', () => api.restoreUser())}
-              >
-                Restore user
-              </button>
-            </div>
-            {msg && <div className="mt-2 font-mono text-xs text-black">{msg}</div>}
-          </div>
+          <button
+            disabled={busy !== null}
+            className="mt-2 border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+            onClick={() =>
+              run('Set speed', async () => {
+                await api.setProducerSpeed(eps)
+              })
+            }
+          >
+            Apply speed
+          </button>
         </div>
+
+        <details className="mt-3 border border-black p-3">
+          <summary className="cursor-pointer text-sm font-semibold text-black select-none">
+            Advanced
+          </summary>
+          <div className="mt-3 space-y-4 border-t border-black pt-3">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-black">
+                Duplicate events (producer)
+              </div>
+              <p className="mt-1 text-xs text-black">
+                When enabled, the producer repeats an event id every N messages so the processor can
+                exercise idempotency. When disabled, duplicates are turned off at the producer.
+              </p>
+              <label className="mt-2 flex cursor-pointer items-center gap-2 text-sm text-black">
+                <input
+                  type="checkbox"
+                  checked={dupEnabled}
+                  onChange={(e) => setDupEnabled(e.target.checked)}
+                  className="h-4 w-4 border border-black accent-black"
+                />
+                <span>Send duplicate event IDs</span>
+              </label>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className="text-sm text-black">Every</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={1000000}
+                  value={everyN}
+                  disabled={!dupEnabled}
+                  onChange={(e) => setEveryN(Number(e.target.value))}
+                  className="w-24 border border-black px-2 py-1 font-mono text-sm text-black disabled:opacity-50"
+                />
+                <span className="text-sm text-black">events</span>
+                <button
+                  disabled={busy !== null}
+                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                  onClick={() => void applyDuplicates()}
+                >
+                  Apply duplicate settings
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wide text-black">
+                Retries & failures (demo)
+              </div>
+              <p className="mt-1 text-xs text-black">
+                Simulating user failure removes user 123 from the user service so matching events
+                are routed to the retry topic. Restore puts the user back.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  disabled={busy !== null}
+                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                  onClick={() => run('Simulate user failure', () => api.simulateDown())}
+                >
+                  Simulate user failure (retries)
+                </button>
+                <button
+                  disabled={busy !== null}
+                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                  onClick={() => run('Restore user 123', () => api.restoreUser())}
+                >
+                  Restore user 123
+                </button>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        {msg && <div className="mt-3 font-mono text-xs text-black">{msg}</div>}
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -209,7 +276,11 @@ export function SimpleDashboard() {
         <SimpleLineChart title="Enriched / sec" points={epsPoints} unit="" />
         <SimpleLineChart title="Raw events / sec" points={rawEpsPoints} unit="" />
       </div>
+
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <SimpleLineChart title="Retries / sec" points={retryEpsPoints} unit="" />
+        <SimpleLineChart title="Errors / sec" points={errorsEpsPoints} unit="" />
+      </div>
     </div>
   )
 }
-
