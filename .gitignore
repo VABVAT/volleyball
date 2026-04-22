@@ -6,4 +6,4 @@ venv/
 .env
 *.jsonl
 .DS_Store
-.worktrees/
+
