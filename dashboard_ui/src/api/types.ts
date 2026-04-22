@@ -58,3 +58,16 @@ export interface ScenarioResult {
   user?: Record<string, unknown>
 }
 
+export interface ProducerSpeed {
+  events_per_sec: number
+}
+
+export interface ProducerDuplicates {
+  duplicate_every_n: number
+}
+
+export interface ProducerControls {
+  speed: ProducerSpeed
+  duplicates: ProducerDuplicates
+}
+

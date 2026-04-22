@@ -2,6 +2,9 @@ import type {
   CurrentMetrics,
   HealthStatus,
   RawSnapshot,
+  ProducerControls,
+  ProducerDuplicates,
+  ProducerSpeed,
   ResultRow,
   ResultStats,
   ScenarioResult,
@@ -40,5 +43,10 @@ export const api = {
   loadBurst: (rate = 200, duration = 10) =>
     post<ScenarioResult>('/api/scenarios/load-burst', { rate, duration }),
   replayDlq: (limit = 100) => post<ScenarioResult>('/api/scenarios/replay-dlq', { limit }),
+  producerControls: () => get<ProducerControls>('/api/controls/producer'),
+  setProducerSpeed: (eps: number) =>
+    post<ProducerSpeed>('/api/controls/producer/speed', { eps }),
+  setProducerDuplicates: (every_n: number) =>
+    post<ProducerDuplicates>('/api/controls/producer/duplicates', { every_n }),
 }
 

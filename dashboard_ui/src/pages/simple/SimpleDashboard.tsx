@@ -1,4 +1,5 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { api } from '../../api/client'
 import { useCurrentMetrics } from '../../hooks/useCurrentMetrics'
 import { useResults } from '../../hooks/useResults'
 import { useTimeSeries } from '../../hooks/useTimeSeries'
@@ -52,6 +53,33 @@ export function SimpleDashboard() {
   const current = data?.snapshot ?? null
   const derived = data?.derived ?? null
   const enriched = enrichedTotal(current)
+  const duplicates = current?.sp.raw['stream_processor_duplicate_events_total'] ?? 0
+  const retryOut = current?.sp.raw['stream_processor_retry_published_total'] ?? 0
+  const errorsRaw = current?.sp.raw['stream_processor_errors_total{stage=\"raw_event\"}'] ?? 0
+  const errorsUser = current?.sp.raw['stream_processor_errors_total{stage=\"user_update\"}'] ?? 0
+  const errorsTotal = errorsRaw + errorsUser
+
+  const [eps, setEps] = useState<number>(20)
+  const [everyN, setEveryN] = useState<number>(12)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string>('')
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const c = await api.producerControls()
+        if (cancelled) return
+        setEps(Math.round(c.speed.events_per_sec))
+        setEveryN(c.duplicates.duplicate_every_n)
+      } catch {
+        /* ignore */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const enrichedEpsNow = useMemo(() => {
     if (series.length < 2) return null
@@ -71,6 +99,20 @@ export function SimpleDashboard() {
 
   const fmt = (v: number | null, digits = 1) => (v == null ? '—' : v.toFixed(digits))
 
+  const run = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label)
+    setMsg(`${label}...`)
+    try {
+      await fn()
+      setMsg(`${label}: OK`)
+    } catch (e) {
+      setMsg(`${label}: ${String(e)}`)
+    } finally {
+      setBusy(null)
+      setTimeout(() => setMsg(''), 2500)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="border border-black bg-white px-3 py-2">
@@ -80,10 +122,94 @@ export function SimpleDashboard() {
         </div>
       </div>
 
+      <div className="border border-black bg-white p-3">
+        <div className="text-sm font-semibold text-black">Controls</div>
+        <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-3">
+          <div className="border border-black p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-black">Stream speed</div>
+            <div className="mt-2 flex items-center gap-3">
+              <input
+                type="range"
+                min={1}
+                max={200}
+                value={eps}
+                onChange={(e) => setEps(Number(e.target.value))}
+                className="w-full"
+              />
+              <div className="w-16 text-right font-mono text-sm text-black">{eps} eps</div>
+            </div>
+            <button
+              disabled={busy !== null}
+              className="mt-2 border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+              onClick={() =>
+                run('Set speed', async () => {
+                  await api.setProducerSpeed(eps)
+                })
+              }
+            >
+              Apply
+            </button>
+          </div>
+
+          <div className="border border-black p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-black">Duplicates</div>
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-sm text-black">Every</span>
+              <input
+                type="number"
+                min={1}
+                value={everyN}
+                onChange={(e) => setEveryN(Number(e.target.value))}
+                className="w-24 border border-black px-2 py-1 font-mono text-sm text-black"
+              />
+              <span className="text-sm text-black">events</span>
+            </div>
+            <button
+              disabled={busy !== null}
+              className="mt-2 border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+              onClick={() =>
+                run('Set duplicates', async () => {
+                  await api.setProducerDuplicates(everyN)
+                })
+              }
+            >
+              Apply
+            </button>
+          </div>
+
+          <div className="border border-black p-3">
+            <div className="text-xs font-semibold uppercase tracking-wide text-black">Generate</div>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                disabled={busy !== null}
+                className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                onClick={() => run('Simulate down', () => api.simulateDown())}
+              >
+                Simulate user down
+              </button>
+              <button
+                disabled={busy !== null}
+                className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                onClick={() => run('Restore user', () => api.restoreUser())}
+              >
+                Restore user
+              </button>
+            </div>
+            {msg && <div className="mt-2 font-mono text-xs text-black">{msg}</div>}
+          </div>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <SimpleStatCard label="Enriched total" value={enriched.toFixed(0)} />
         <SimpleStatCard label="Enriched / sec (recent)" value={fmt(enrichedEpsNow, 1)} />
         <SimpleStatCard label="Enriched %" value={fmt(derived?.success_rate_pct ?? null, 1)} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <SimpleStatCard label="Duplicates total" value={duplicates.toFixed(0)} />
+        <SimpleStatCard label="Retry out total" value={retryOut.toFixed(0)} />
+        <SimpleStatCard label="Errors total" value={errorsTotal.toFixed(0)} />
       </div>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
