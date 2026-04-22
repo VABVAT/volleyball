@@ -63,7 +63,23 @@ async def _scraper_loop() -> None:
                 _scrape(client, USER_METRICS),
                 _scrape(client, RESULT),
             )
-            store.push(Snapshot(ts=t0, sp=sp, rw=rw, dq=dq, us=us, rs=rs))
+            snap = Snapshot(ts=t0, sp=sp, rw=rw, dq=dq, us=us, rs=rs)
+            store.push(snap)
+            prev = store.prev()
+            if prev is not None and snap.sp.reachable and prev.sp.reachable:
+                dt = snap.ts - prev.ts
+                if dt > 0:
+                    key_raw = "stream_processor_events_consumed_total"
+                    key_en = "stream_processor_enriched_events_total"
+                    r0 = float(prev.sp.raw.get(key_raw) or 0.0)
+                    r1 = float(snap.sp.raw.get(key_raw) or 0.0)
+                    e0 = float(prev.sp.raw.get(key_en) or 0.0)
+                    e1 = float(snap.sp.raw.get(key_en) or 0.0)
+                    dr = int(r1 - r0)
+                    de = int(e1 - e0)
+                    await append_activity(
+                        f"pipeline tick Δ{dt:.1f}s  raw_consumed +{dr}  enriched +{de}"
+                    )
             await asyncio.sleep(max(0.1, SCRAPE_INTERVAL - (time.time() - t0)))
 
 

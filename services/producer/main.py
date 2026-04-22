@@ -36,16 +36,21 @@ log = structlog.get_logger()
 
 BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 INTERVAL = float(os.getenv("PRODUCER_INTERVAL_SEC", "0.2"))
-DUPLICATE_EVERY_N = int(os.getenv("DUPLICATE_EVERY_N", "15"))
+# Default off: very large N so duplicate event IDs are not sent unless configured.
+DUPLICATE_EVERY_N = int(os.getenv("DUPLICATE_EVERY_N", "1000000"))
 ADMIN_PORT = int(os.getenv("PRODUCER_ADMIN_PORT", "8010"))
 USE_AVRO = os.getenv("KAFKA_USE_AVRO", "0").lower() in ("1", "true", "yes")
+# Prefer explicit target rate; else derive from PRODUCER_INTERVAL_SEC for backward compatibility.
+_eps_env = os.getenv("PRODUCER_EVENTS_PER_SEC", "").strip()
+events_per_sec: float = (
+    max(0.1, float(_eps_env)) if _eps_env else max(0.1, 1.0 / max(0.001, INTERVAL))
+)
 
 USER_IDS = list(range(1, 31)) + [123]
 ACTIONS = ["click", "view", "purchase", "signup"]
 
 shutdown_event = asyncio.Event()
 settings_lock = asyncio.Lock()
-events_per_sec: float = max(0.1, 1.0 / max(0.001, INTERVAL))
 duplicate_every_n: int = max(1, DUPLICATE_EVERY_N)
 
 tracer = init_tracer("producer")

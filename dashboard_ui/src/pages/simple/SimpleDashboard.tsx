@@ -23,6 +23,18 @@ function sumStreamProcessorErrors(raw: Record<string, number>): number {
     .reduce((acc, [, v]) => acc + (typeof v === 'number' ? v : 0), 0)
 }
 
+/** Sum consumer lag across raw-events partitions (topic has 3 partitions in compose). */
+function sumRawEventsLag(raw: Record<string, number>): number {
+  const topic = 'raw-events'
+  let s = 0
+  for (let p = 0; p < 3; p++) {
+    const key = `stream_processor_consumer_lag_messages{partition="${p}",topic="${topic}"}`
+    const key2 = `stream_processor_consumer_lag_messages{topic="${topic}",partition="${p}"}`
+    s += raw[key] ?? raw[key2] ?? 0
+  }
+  return s
+}
+
 function pointsEnrichedEps(series: RawSnapshot[]): SimplePoint[] {
   return series.map((s, i) => {
     const prev = series[i - 1]
@@ -35,7 +47,11 @@ function pointsEnrichedEps(series: RawSnapshot[]): SimplePoint[] {
   })
 }
 
-/** Rate of raw-events intake (counter is consumed messages; ≈ producer rate when lag is stable). */
+/**
+ * Rate of raw-events intake (counter is messages consumed from the topic).
+ * Matches the producer slider only when consumer lag is near zero; otherwise the processor
+ * drains backlog as fast as it can, so this can stay high while lag is large.
+ */
 function pointsRawEventsEps(series: RawSnapshot[]): SimplePoint[] {
   const key = 'stream_processor_events_consumed_total'
   return series.map((s, i) => {
@@ -88,6 +104,10 @@ export function SimpleDashboard() {
   const duplicates = current?.sp.raw['stream_processor_duplicate_events_total'] ?? 0
   const retryOut = current?.sp.raw['stream_processor_retry_published_total'] ?? 0
   const errorsTotal = useMemo(() => sumStreamProcessorErrors(current?.sp.raw ?? {}), [current])
+  const rawBacklogMsgs = useMemo(() => {
+    if (!current?.sp.reachable) return null
+    return sumRawEventsLag(current.sp.raw)
+  }, [current])
 
   const [eps, setEps] = useState<number>(20)
   const [dupEnabled, setDupEnabled] = useState(false)
@@ -98,10 +118,11 @@ export function SimpleDashboard() {
     null,
   )
   const [logLines, setLogLines] = useState<{ ts: number; message: string }[]>([])
+  const [producerHydrated, setProducerHydrated] = useState(false)
 
   const refreshActivity = useCallback(async () => {
     try {
-      const r = await api.activity(250)
+      const r = await api.activity(400)
       setLogLines(r.lines)
     } catch {
       /* ignore */
@@ -141,12 +162,22 @@ export function SimpleDashboard() {
         if (on) setEveryN(n)
       } catch {
         /* ignore */
+      } finally {
+        if (!cancelled) setProducerHydrated(true)
       }
     })()
     return () => {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (!producerHydrated) return
+    const t = window.setTimeout(() => {
+      void api.setProducerSpeed(eps).catch(() => {})
+    }, 450)
+    return () => window.clearTimeout(t)
+  }, [eps, producerHydrated])
 
   const enrichedEpsNow = useMemo(() => {
     if (series.length < 2) return null
@@ -196,55 +227,6 @@ export function SimpleDashboard() {
 
   return (
     <div className="space-y-4">
-      <div className="border border-black bg-white px-3 py-2">
-        <div className="text-sm font-bold text-black">Pipeline Dashboard (simple)</div>
-        <div className="text-xs text-black">
-          The user service keeps <span className="font-semibold">31 canonical users</span> (ids 1–30 and
-          123); the producer samples from that pool. Delete users <span className="font-semibold">1, 2, 3,
-          or 123</span> to simulate missing profiles (retries/errors), then restore the same id.
-          Activity log below polls dashboard API events.
-        </div>
-        <details className="mt-2 border-t border-black pt-2 text-xs text-black">
-          <summary className="cursor-pointer font-semibold text-black select-none">
-            When retries vs errors fire (and how this maps to the problem statement)
-          </summary>
-          <ul className="mt-2 list-disc space-y-1.5 pl-4">
-            <li>
-              <span className="font-semibold">Delete demo user</span> (users 1, 2, 3, or 123) removes that
-              row and Redis cache. Events for that user id then cannot be enriched: the stream processor
-              increments{' '}
-              <code className="font-mono">stream_processor_errors_total{'{'}stage=&quot;user_unavailable&quot;{'}'}</code>{' '}
-              (counted on the <span className="font-semibold">Errors</span> chart) and publishes to{' '}
-              <span className="font-semibold">retry-events</span> (also increments{' '}
-              <code className="font-mono">stream_processor_retry_published_total</code> once per event).
-            </li>
-            <li>
-              <span className="font-semibold">Retries chart</span> (derivative of{' '}
-              <code className="font-mono">retry_worker_messages_consumed_total</code>): each consume is
-              one pass. The worker <span className="font-semibold">waits until</span>{' '}
-              <code className="font-mono">retry_after</code> (≥1s exponential backoff between attempts,
-              first hop delayed by the stream processor) instead of tight requeue loops.
-            </li>
-            <li>
-              <span className="font-semibold">Errors chart</span> (sum of{' '}
-              <code className="font-mono">stream_processor_errors_total</code>): includes{' '}
-              <code className="font-mono">user_unavailable</code> (missing user after simulate) plus true
-              failures such as <code className="font-mono">raw_event</code> exceptions and{' '}
-              <code className="font-mono">user_update</code> handling errors.
-            </li>
-            <li>
-              <span className="font-semibold">Idempotency</span>: duplicate raw event IDs hit Redis state
-              and increment <code className="font-mono">stream_processor_duplicate_events_total</code>.
-            </li>
-            <li>
-              <span className="font-semibold">Result service</span>: consumes{' '}
-              <span className="font-semibold">enriched-events</span> and stores outcomes (see result-service
-              metrics/API), separate from these graphs.
-            </li>
-          </ul>
-        </details>
-      </div>
-
       <div className="border border-black bg-white p-3">
         <div className="text-sm font-semibold text-black">Controls</div>
 
@@ -261,17 +243,12 @@ export function SimpleDashboard() {
             />
             <div className="w-20 shrink-0 text-right font-mono text-sm text-black">{eps} eps</div>
           </div>
-          <button
-            disabled={busy !== null}
-            className="mt-2 border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-            onClick={() =>
-              run('Set speed', async () => {
-                await api.setProducerSpeed(eps)
-              })
-            }
-          >
-            Apply speed
-          </button>
+          <p className="mt-2 text-xs text-black">
+            This sets how many <span className="font-semibold">new</span> events/sec the producer writes.
+            Enriched/sec stays high while <span className="font-semibold">raw-events</span> has a large
+            backlog (see backlog stat): the stream processor drains the topic as fast as it can until lag
+            is near zero. Speed updates after a short pause while you drag the slider.
+          </p>
         </div>
 
         <details className="mt-3 border border-black p-3">
@@ -279,6 +256,46 @@ export function SimpleDashboard() {
             Advanced
           </summary>
           <div className="mt-3 space-y-4 border-t border-black pt-3">
+            <details className="text-xs text-black">
+              <summary className="cursor-pointer font-semibold text-black select-none">
+                When retries vs errors fire (and how this maps to the problem statement)
+              </summary>
+              <ul className="mt-2 list-disc space-y-1.5 pl-4">
+                <li>
+                  <span className="font-semibold">Delete demo user</span> (users 1, 2, 3, or 123) removes
+                  that row and Redis cache. Events for that user id then cannot be enriched: the stream
+                  processor increments{' '}
+                  <code className="font-mono">stream_processor_errors_total{'{'}stage=&quot;user_unavailable&quot;{'}'}</code>{' '}
+                  (counted on the <span className="font-semibold">Errors</span> chart) and publishes to{' '}
+                  <span className="font-semibold">retry-events</span> (also increments{' '}
+                  <code className="font-mono">stream_processor_retry_published_total</code> once per event).
+                </li>
+                <li>
+                  <span className="font-semibold">Retries chart</span> (derivative of{' '}
+                  <code className="font-mono">retry_worker_messages_consumed_total</code>): each consume is
+                  one pass. The worker <span className="font-semibold">waits until</span>{' '}
+                  <code className="font-mono">retry_after</code> (≥1s exponential backoff between attempts,
+                  first hop delayed by the stream processor) instead of tight requeue loops.
+                </li>
+                <li>
+                  <span className="font-semibold">Errors chart</span> (sum of{' '}
+                  <code className="font-mono">stream_processor_errors_total</code>): includes{' '}
+                  <code className="font-mono">user_unavailable</code> (missing user after simulate) plus true
+                  failures such as <code className="font-mono">raw_event</code> exceptions and{' '}
+                  <code className="font-mono">user_update</code> handling errors.
+                </li>
+                <li>
+                  <span className="font-semibold">Idempotency</span>: duplicate raw event IDs hit Redis state
+                  and increment <code className="font-mono">stream_processor_duplicate_events_total</code>.
+                </li>
+                <li>
+                  <span className="font-semibold">Result service</span>: consumes{' '}
+                  <span className="font-semibold">enriched-events</span> and stores outcomes (see
+                  result-service metrics/API), separate from these graphs.
+                </li>
+              </ul>
+            </details>
+
             <div>
               <div className="text-xs font-semibold uppercase tracking-wide text-black">
                 Duplicate events (producer)
@@ -369,10 +386,14 @@ export function SimpleDashboard() {
         {msg && <div className="mt-3 font-mono text-xs text-black">{msg}</div>}
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-5">
         <SimpleStatCard label="Enriched total" value={enriched.toFixed(0)} />
         <SimpleStatCard label="Enriched / sec (recent)" value={fmt(enrichedEpsNow, 1)} />
         <SimpleStatCard label="Enriched %" value={fmt(derived?.success_rate_pct ?? null, 1)} />
+        <SimpleStatCard
+          label="Raw-events backlog (msgs)"
+          value={rawBacklogMsgs == null ? '—' : Math.round(rawBacklogMsgs).toLocaleString()}
+        />
         <SimpleStatCard
           label="Users (DB / canonical)"
           value={
@@ -402,7 +423,8 @@ export function SimpleDashboard() {
       <div className="border border-black bg-white p-3">
         <div className="text-sm font-semibold text-black">Activity log</div>
         <p className="mt-1 text-xs text-black">
-          Recent dashboard API actions (producer controls, scenarios). Refreshes automatically.
+          Each metrics scrape adds a line with raw consumed and enriched counter deltas; API actions
+          (producer controls, scenarios) appear here too. Refreshes automatically.
         </p>
         <pre
           className="mt-2 max-h-56 overflow-y-auto border border-black bg-white p-2 font-mono text-[11px] leading-snug text-black whitespace-pre-wrap"

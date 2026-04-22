@@ -120,8 +120,7 @@ services:
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
       KAFKA_USE_AVRO: '1'
       OTLP_ENDPOINT: jaeger:4317
-      PRODUCER_INTERVAL_SEC: '0.15'
-      DUPLICATE_EVERY_N: '12'
+      PRODUCER_EVENTS_PER_SEC: '20'
       LOG_LEVEL: INFO
       PRODUCER_ADMIN_PORT: '8010'
     ports:
