@@ -50,8 +50,8 @@ export function SimpleDashboard() {
   const { rows } = useResults(5000)
 
   const current = data?.snapshot ?? null
+  const derived = data?.derived ?? null
   const enriched = enrichedTotal(current)
-  const lag = sumRawEventLag(current)
 
   const enrichedEpsNow = useMemo(() => {
     if (series.length < 2) return null
@@ -83,7 +83,7 @@ export function SimpleDashboard() {
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <SimpleStatCard label="Enriched total" value={enriched.toFixed(0)} />
         <SimpleStatCard label="Enriched / sec (recent)" value={fmt(enrichedEpsNow, 1)} />
-        <SimpleStatCard label="Raw-events lag (sum)" value={lag.toFixed(0)} />
+        <SimpleStatCard label="Enriched %" value={fmt(derived?.success_rate_pct ?? null, 1)} />
       </div>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
