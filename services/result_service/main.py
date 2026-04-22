@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-from collections import Counter as PyCounter
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -17,7 +16,7 @@ import uvicorn
 from aiokafka import AIOKafkaConsumer
 from fastapi import FastAPI
 from prometheus_client import Counter, generate_latest
-from sqlalchemy import Integer, String, select
+from sqlalchemy import Integer, String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from starlette.responses import PlainTextResponse
@@ -181,17 +180,39 @@ async def list_results(limit: int = 50):
 
 @app.get("/results/stats")
 async def stats():
+    """Aggregates in SQL so large tables do not load every row into memory."""
     async with SessionLocal() as session:
-        res = await session.execute(select(EnrichedRecord))
-        rows = res.scalars().all()
-    by_action = PyCounter(r.action for r in rows)
-    by_tier = PyCounter((r.tier or "unknown") for r in rows)
-    by_source = PyCounter(r.source for r in rows)
+        total = int(
+            (await session.execute(select(func.count()).select_from(EnrichedRecord))).scalar_one()
+        )
+        by_action = {
+            str(a): int(c)
+            for a, c in (
+                await session.execute(
+                    select(EnrichedRecord.action, func.count()).group_by(EnrichedRecord.action)
+                )
+            ).all()
+        }
+        tier_key = func.coalesce(EnrichedRecord.tier, "unknown")
+        by_tier = {
+            str(t): int(c)
+            for t, c in (
+                await session.execute(select(tier_key, func.count()).group_by(tier_key))
+            ).all()
+        }
+        by_source = {
+            str(s): int(c)
+            for s, c in (
+                await session.execute(
+                    select(EnrichedRecord.source, func.count()).group_by(EnrichedRecord.source)
+                )
+            ).all()
+        }
     return {
-        "total": len(rows),
-        "by_action": dict(by_action),
-        "by_tier": dict(by_tier),
-        "by_source": dict(by_source),
+        "total": total,
+        "by_action": by_action,
+        "by_tier": by_tier,
+        "by_source": by_source,
     }
 
 

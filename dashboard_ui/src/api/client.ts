@@ -14,10 +14,29 @@ import type {
 
 const BASE = '' // nginx proxies /api → dashboard-api
 
-async function get<T>(path: string): Promise<T> {
-  const r = await fetch(`${BASE}${path}`)
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`)
-  return r.json() as Promise<T>
+/** Result-service proxies can be slow on large DBs; allow a long read timeout. */
+const RESULT_FETCH_TIMEOUT_MS = 120_000
+
+async function get<T>(path: string, opts?: { timeoutMs?: number }): Promise<T> {
+  const timeoutMs = opts?.timeoutMs
+  const ctrl = new AbortController()
+  const tid =
+    timeoutMs != null ? window.setTimeout(() => ctrl.abort(), timeoutMs) : undefined
+  try {
+    const r = await fetch(`${BASE}${path}`, { signal: ctrl.signal })
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`)
+    return r.json() as Promise<T>
+  } catch (e) {
+    const aborted =
+      (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError') ||
+      (e instanceof Error && e.name === 'AbortError')
+    if (aborted && timeoutMs != null) {
+      throw new Error(`Request timed out after ${timeoutMs}ms — ${path}`)
+    }
+    throw e
+  } finally {
+    if (tid !== undefined) window.clearTimeout(tid)
+  }
 }
 
 async function post<T>(
@@ -38,8 +57,9 @@ export const api = {
   timeSeries: (window = 300) =>
     get<RawSnapshot[]>(`/api/metrics/timeseries?window=${window}`),
   health: () => get<HealthStatus>('/api/health'),
-  results: (limit = 50) => get<ResultRow[]>(`/api/results?limit=${limit}`),
-  resultStats: () => get<ResultStats>('/api/results/stats'),
+  results: (limit = 50) =>
+    get<ResultRow[]>(`/api/results?limit=${limit}`, { timeoutMs: RESULT_FETCH_TIMEOUT_MS }),
+  resultStats: () => get<ResultStats>('/api/results/stats', { timeoutMs: RESULT_FETCH_TIMEOUT_MS }),
   deleteDemoUser: (userId: 1 | 2 | 3 | 123) =>
     post<ScenarioResult>(`/api/scenarios/demo-users/${userId}/delete`),
   restoreDemoUser: (userId: 1 | 2 | 3 | 123) =>

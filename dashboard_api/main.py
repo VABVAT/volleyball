@@ -33,6 +33,8 @@ RETRY_SVC = os.getenv("METRICS_RETRY_WORKER", "http://localhost:8004")
 DLQ_SVC = os.getenv("METRICS_DLQ_HANDLER", "http://localhost:8005")
 USER_METRICS = os.getenv("METRICS_USER_SERVICE", "http://localhost:8080")
 RESULT = os.getenv("RESULT_SERVICE_URL", "http://localhost:8006")
+# Result list/stats can be slow on large tables; keep above nginx proxy_read_timeout.
+RESULT_HTTP_TIMEOUT = float(os.getenv("RESULT_SERVICE_HTTP_TIMEOUT", "120.0"))
 USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8080")
 PRODUCER_ADMIN_URL = os.getenv("PRODUCER_ADMIN_URL", "http://localhost:8010")
 KAFKA = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -182,15 +184,19 @@ async def health():
 
 @app.get("/api/results")
 async def proxy_results(limit: int = 50):
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    timeout = httpx.Timeout(RESULT_HTTP_TIMEOUT, connect=15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.get(f"{RESULT.rstrip('/')}/results", params={"limit": limit})
+        r.raise_for_status()
         return r.json()
 
 
 @app.get("/api/results/stats")
 async def proxy_stats():
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    timeout = httpx.Timeout(RESULT_HTTP_TIMEOUT, connect=15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.get(f"{RESULT.rstrip('/')}/results/stats")
+        r.raise_for_status()
         return r.json()
 
 
