@@ -39,9 +39,6 @@ INTERVAL = float(os.getenv("PRODUCER_INTERVAL_SEC", "0.2"))
 DUPLICATE_EVERY_N = int(os.getenv("DUPLICATE_EVERY_N", "15"))
 ADMIN_PORT = int(os.getenv("PRODUCER_ADMIN_PORT", "8010"))
 USE_AVRO = os.getenv("KAFKA_USE_AVRO", "0").lower() in ("1", "true", "yes")
-# If > 0, every Nth message is intentionally invalid so the stream processor records errors
-# and skips the offset (see consumer commit-on-error path).
-INVALID_EVENT_EVERY_N = int(os.getenv("PRODUCER_INVALID_EVENT_EVERY_N", "0"))
 
 USER_IDS = [1, 2, 3, 123]
 ACTIONS = ["click", "view", "purchase", "signup"]
@@ -127,32 +124,18 @@ async def run() -> None:
                 eps = events_per_sec
                 dup_n = duplicate_every_n
             n += 1
-            chaos = INVALID_EVENT_EVERY_N > 0 and n % INVALID_EVENT_EVERY_N == 0
-            if chaos:
-                eid = f"chaos-{uuid.uuid4()}"
-                log.info("sending_invalid_raw_event", n=n)
-                if USE_AVRO and _avro_parsed is not None:
-                    val = b"\xff\x00\x01not-valid-confluent-wire-format"
-                else:
-                    val = b'{"eventId":"chaos-bad-payload","action":"x"}'
-            elif n % dup_n == 0 and last_duplicate_id:
+            if n % dup_n == 0 and last_duplicate_id:
                 eid = last_duplicate_id
                 log.info("sending_duplicate_eventId", event_id=eid)
-                payload = {
-                    "eventId": eid,
-                    "userId": random.choice(USER_IDS),
-                    "action": random.choice(ACTIONS),
-                }
-                val = encode_payload(payload)
             else:
                 eid = str(uuid.uuid4())
                 last_duplicate_id = eid
-                payload = {
-                    "eventId": eid,
-                    "userId": random.choice(USER_IDS),
-                    "action": random.choice(ACTIONS),
-                }
-                val = encode_payload(payload)
+            payload = {
+                "eventId": eid,
+                "userId": random.choice(USER_IDS),
+                "action": random.choice(ACTIONS),
+            }
+            val = encode_payload(payload)
             carrier: dict[str, str] = {}
             inject(carrier)
             headers = kafka_headers_from_carrier(carrier)

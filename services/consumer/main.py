@@ -76,7 +76,11 @@ PROC_LATENCY = Histogram(
     "End-to-end processing time for raw events",
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
 )
-ERRORS = Counter("stream_processor_errors_total", "Unexpected handler errors", ["stage"])
+ERRORS = Counter(
+    "stream_processor_errors_total",
+    "Handler failures (exceptions plus user_unavailable when routing to retry)",
+    ["stage"],
+)
 CONSUMER_LAG = Gauge(
     "stream_processor_consumer_lag_messages",
     "Approximate consumer lag (log end minus committed)",
@@ -282,21 +286,17 @@ async def raw_events_loop() -> None:
                             await consumer.commit()
                         continue
 
-                    hit = lru_user_cache.get(event.user_id)
-                    if hit is not None:
-                        user_dict, err = hit, None
-                    else:
-                        user_dict, err = await resolve_user(
-                            redis,
-                            http,
-                            USER_SERVICE_URL,
-                            event.user_id,
-                            None,
-                            CACHE_TTL_SEC,
-                            USER_HTTP_RETRIES,
-                        )
-                        if user_dict is not None:
-                            lru_user_cache.set(event.user_id, user_dict)
+                    # Always resolve via Redis + HTTP (no in-process LRU shortcut) so simulate-down
+                    # (DB + Redis projection cleared by user-service) is visible immediately.
+                    user_dict, err = await resolve_user(
+                        redis,
+                        http,
+                        USER_SERVICE_URL,
+                        event.user_id,
+                        None,
+                        CACHE_TTL_SEC,
+                        USER_HTTP_RETRIES,
+                    )
 
                     if user_dict is None:
                         env = RetryEnvelope(
@@ -318,6 +318,7 @@ async def raw_events_loop() -> None:
                         else:
                             await producer.send_and_wait(RETRY_EVENTS, payload)
                             await consumer.commit()
+                        ERRORS.labels("user_unavailable").inc()
                         RETRY_OUT.inc()
                         log.warning("event_routed_to_retry", event_id=event.event_id, error=err)
                         continue

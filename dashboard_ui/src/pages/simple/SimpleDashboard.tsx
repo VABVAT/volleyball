@@ -60,6 +60,20 @@ function pointsCounterDerivativeEps(
   })
 }
 
+/** Each retry-worker consume is one pass over a retry envelope (up to MAX_RETRY_ATTEMPTS, default 3). */
+function pointsRetryWorkerConsumedEps(series: RawSnapshot[]): SimplePoint[] {
+  const key = 'retry_worker_messages_consumed_total'
+  return series.map((s, i) => {
+    const prev = series[i - 1]
+    if (!prev || !s.rw.reachable || !prev.rw.reachable) return { t: s.ts, v: null }
+    const dt = s.ts - prev.ts
+    if (dt <= 0) return { t: s.ts, v: null }
+    const cur = s.rw.raw[key] ?? 0
+    const p = prev.rw.raw[key] ?? 0
+    return { t: s.ts, v: Math.max(0, (cur - p) / dt) }
+  })
+}
+
 export function SimpleDashboard() {
   const { data } = useCurrentMetrics(2000)
   const series = useTimeSeries(600, 3000)
@@ -111,11 +125,7 @@ export function SimpleDashboard() {
 
   const epsPoints = useMemo(() => pointsEnrichedEps(series), [series])
   const rawEpsPoints = useMemo(() => pointsRawEventsEps(series), [series])
-  const retryEpsPoints = useMemo(
-    () =>
-      pointsCounterDerivativeEps(series, (raw) => raw['stream_processor_retry_published_total'] ?? 0),
-    [series],
-  )
+  const retryWorkerEpsPoints = useMemo(() => pointsRetryWorkerConsumedEps(series), [series])
   const errorsEpsPoints = useMemo(
     () => pointsCounterDerivativeEps(series, (raw) => sumStreamProcessorErrors(raw)),
     [series],
@@ -150,8 +160,9 @@ export function SimpleDashboard() {
       <div className="border border-black bg-white px-3 py-2">
         <div className="text-sm font-bold text-black">Pipeline Dashboard (simple)</div>
         <div className="text-xs text-black">
-          Demo compose keeps user 123 absent and injects occasional bad raw payloads so retry and
-          error rates are visible without clicking anything. Refresh if you just started the stack.
+          Use <span className="font-semibold">Simulate user failure</span> to remove user 123, then
+          watch errors and retry-worker activity. <span className="font-semibold">Restore user 123</span>{' '}
+          returns normal enrichment. Refresh if you just started the stack.
         </div>
         <details className="mt-2 border-t border-black pt-2 text-xs text-black">
           <summary className="cursor-pointer font-semibold text-black select-none">
@@ -159,25 +170,26 @@ export function SimpleDashboard() {
           </summary>
           <ul className="mt-2 list-disc space-y-1.5 pl-4">
             <li>
+              <span className="font-semibold">Simulate user failure</span> deletes user 123. Events for
+              user 123 then cannot be enriched: the stream processor increments{' '}
+              <code className="font-mono">stream_processor_errors_total{'{'}stage=&quot;user_unavailable&quot;{'}'}</code>{' '}
+              (counted on the <span className="font-semibold">Errors</span> chart) and publishes to{' '}
+              <span className="font-semibold">retry-events</span> (also increments{' '}
+              <code className="font-mono">stream_processor_retry_published_total</code> once per event).
+            </li>
+            <li>
               <span className="font-semibold">Retries chart</span> (derivative of{' '}
-              <code className="font-mono">stream_processor_retry_published_total</code>): the stream
-              processor increments this when it <span className="font-semibold">successfully parsed</span>{' '}
-              a raw event but <span className="font-semibold">could not resolve the user</span> (HTTP 404
-              / timeouts after its own HTTP retries). It then publishes a retry envelope to{' '}
-              <span className="font-semibold">retry-events</span> instead of enriched-events.
+              <code className="font-mono">retry_worker_messages_consumed_total</code>): each time the
+              retry worker consumes a message is one processing pass. While user 123 stays missing, the
+              worker requeues with backoff until <span className="font-semibold">up to 3 attempts</span>{' '}
+              (<code className="font-mono">MAX_RETRY_ATTEMPTS</code>), then DLQ.
             </li>
             <li>
               <span className="font-semibold">Errors chart</span> (sum of{' '}
-              <code className="font-mono">stream_processor_errors_total</code> labels): incremented on{' '}
-              <span className="font-semibold">unexpected exceptions</span> while handling raw-events
-              (e.g. corrupt payload) or user-updates. It is not used for the “missing user” path—that
-              path is a retry, not a counted error.
-            </li>
-            <li>
-              <span className="font-semibold">Retry worker</span> (not this chart): consumes{' '}
-              <span className="font-semibold">retry-events</span>, merges user data, and republishes with
-              exponential backoff until success or <span className="font-semibold">up to 3 attempts</span>{' '}
-              (<code className="font-mono">MAX_RETRY_ATTEMPTS</code>), then DLQ if still failing.
+              <code className="font-mono">stream_processor_errors_total</code>): includes{' '}
+              <code className="font-mono">user_unavailable</code> (missing user after simulate) plus true
+              failures such as <code className="font-mono">raw_event</code> exceptions and{' '}
+              <code className="font-mono">user_update</code> handling errors.
             </li>
             <li>
               <span className="font-semibold">Idempotency</span>: duplicate raw event IDs hit Redis state
@@ -267,12 +279,12 @@ export function SimpleDashboard() {
 
             <div>
               <div className="text-xs font-semibold uppercase tracking-wide text-black">
-                Retries & failures (demo)
+                Retries & failures
               </div>
               <p className="mt-1 text-xs text-black">
-                In docker compose demo, user 123 is already absent so you should see retries without
-                clicking. &quot;Simulate user failure&quot; deletes user 123 if present; &quot;Restore&quot;
-                recreates them so those events enrich again.
+                The producer randomly includes <span className="font-semibold">userId 123</span>. After
+                simulate-down, those events error (user unavailable), route to retry, and the retry worker
+                runs up to three attempts. Restore recreates user 123 so new events enrich normally.
               </p>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
@@ -315,7 +327,7 @@ export function SimpleDashboard() {
       </div>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <SimpleLineChart title="Retries / sec" points={retryEpsPoints} unit="" />
+        <SimpleLineChart title="Retry worker / sec" points={retryWorkerEpsPoints} unit="" />
         <SimpleLineChart title="Errors / sec" points={errorsEpsPoints} unit="" />
       </div>
     </div>

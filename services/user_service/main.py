@@ -17,12 +17,14 @@ from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI, HTTPException
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from redis.asyncio import Redis
 from sqlalchemy import Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from starlette.responses import PlainTextResponse
 
 from shared.kafka_topics import USER_UPDATES
+from shared.redis_keys import user_profile_key
 from shared.schemas import UserProfile, UserUpdateMessage
 
 structlog.configure(
@@ -63,6 +65,7 @@ class UserRow(Base):
 
 
 producer: AIOKafkaProducer | None = None
+_redis_client: Redis | None = None
 
 HTTP_REQUESTS = Counter(
     "user_service_http_requests_total", "HTTP requests", ["method", "path", "status"]
@@ -91,6 +94,28 @@ def row_to_profile(row: UserRow) -> UserProfile:
     return UserProfile(userId=row.user_id, name=row.name, email=row.email, tier=row.tier)
 
 
+async def _get_redis_if_configured() -> Redis | None:
+    global _redis_client
+    url = os.getenv("REDIS_URL", "").strip()
+    if not url:
+        return None
+    if _redis_client is None:
+        _redis_client = Redis.from_url(url, decode_responses=True)
+    return _redis_client
+
+
+async def _invalidate_redis_user_projection(user_id: int) -> None:
+    """Drop cached profile so stream-processor/retry-worker re-fetch from HTTP after simulate-down."""
+    client = await _get_redis_if_configured()
+    if client is None:
+        return
+    try:
+        await client.delete(user_profile_key(user_id))
+        log.info("redis_user_projection_deleted", user_id=user_id)
+    except Exception as e:
+        log.warning("redis_user_projection_delete_failed", user_id=user_id, error=str(e))
+
+
 async def publish_user_update(profile: UserProfile) -> None:
     p = await get_producer()
     body = UserUpdateMessage(user=profile).model_dump(by_alias=True)
@@ -106,12 +131,11 @@ async def seed_db_and_kafka() -> None:
     async with SessionLocal() as session:
         exists = (await session.execute(select(UserRow).limit(1))).first()
         if exists is None:
-            # User 123 is intentionally not seeded: the mock producer still emits userId 123 so
-            # the pipeline exercises retry-events without needing manual "simulate down".
             seed = [
                 UserRow(user_id=1, name="Alice", email="alice@example.com", tier="pro"),
                 UserRow(user_id=2, name="Bob", email="bob@example.com", tier="standard"),
                 UserRow(user_id=3, name="Carol", email="carol@example.com", tier="standard"),
+                UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro"),
             ]
             session.add_all(seed)
             await session.commit()
@@ -124,29 +148,19 @@ async def seed_db_and_kafka() -> None:
             await publish_user_update(row_to_profile(row))
 
 
-async def _demo_remove_user_123_if_configured() -> None:
-    """Strip user 123 on boot so older volumes that still have row 123 behave like a fresh demo."""
-    if os.getenv("USER_SERVICE_DEMO_MISSING_USER_123", "0").lower() not in ("1", "true", "yes"):
-        return
-    async with SessionLocal() as session:
-        row = await session.get(UserRow, 123)
-        if row is not None:
-            await session.delete(row)
-            await session.commit()
-            log.info("demo_missing_user_123_removed")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("user_service_starting", kafka=settings.kafka_bootstrap_servers)
     await get_producer()
     await seed_db_and_kafka()
-    await _demo_remove_user_123_if_configured()
     yield
-    global producer
+    global producer, _redis_client
     if producer:
         await producer.stop()
         producer = None
+    if _redis_client is not None:
+        await _redis_client.close()
+        _redis_client = None
     await engine.dispose()
     log.info("user_service_stopped")
 
@@ -213,6 +227,7 @@ async def simulate_down():
         if row:
             await session.delete(row)
             await session.commit()
+    await _invalidate_redis_user_projection(123)
     return {"ok": True, "message": "user 123 removed from database (simulate missing user)"}
 
 
