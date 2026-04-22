@@ -227,6 +227,17 @@ async def user_updates_loop() -> None:
         await consumer.stop()
 
 
+async def _commit_raw_offset(consumer: AIOKafkaConsumer, producer: AIOKafkaProducer, msg) -> None:
+    """Commit raw-events offset after a poison-pill or unexpected handler failure."""
+    tp = TopicPartition(msg.topic, msg.partition)
+    om = OffsetAndMetadata(msg.offset + 1, "")
+    if KAFKA_ENABLE_TXN:
+        async with producer.transaction():
+            await producer.send_offsets_to_transaction({tp: om}, RAW_GROUP)
+    else:
+        await consumer.commit()
+
+
 async def raw_events_loop() -> None:
     consumer = AIOKafkaConsumer(
         RAW_EVENTS,
@@ -339,6 +350,10 @@ async def raw_events_loop() -> None:
             except Exception as e:
                 ERRORS.labels("raw_event").inc()
                 log.exception("raw_event_failed", error=str(e))
+                try:
+                    await _commit_raw_offset(consumer, producer, msg)
+                except Exception as ce:
+                    log.exception("raw_commit_after_error_failed", error=str(ce))
                 continue
     except asyncio.CancelledError:
         pass

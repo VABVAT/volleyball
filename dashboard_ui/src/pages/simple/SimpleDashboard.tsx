@@ -150,10 +150,46 @@ export function SimpleDashboard() {
       <div className="border border-black bg-white px-3 py-2">
         <div className="text-sm font-bold text-black">Pipeline Dashboard (simple)</div>
         <div className="text-xs text-black">
-          Raw throughput uses stream-processor consumption (matches producer when the pipeline is
-          caught up). Retries chart tracks events routed to the retry topic; errors chart sums
-          stream-processor error counters. Refresh if you just started the stack.
+          Demo compose keeps user 123 absent and injects occasional bad raw payloads so retry and
+          error rates are visible without clicking anything. Refresh if you just started the stack.
         </div>
+        <details className="mt-2 border-t border-black pt-2 text-xs text-black">
+          <summary className="cursor-pointer font-semibold text-black select-none">
+            When retries vs errors fire (and how this maps to the problem statement)
+          </summary>
+          <ul className="mt-2 list-disc space-y-1.5 pl-4">
+            <li>
+              <span className="font-semibold">Retries chart</span> (derivative of{' '}
+              <code className="font-mono">stream_processor_retry_published_total</code>): the stream
+              processor increments this when it <span className="font-semibold">successfully parsed</span>{' '}
+              a raw event but <span className="font-semibold">could not resolve the user</span> (HTTP 404
+              / timeouts after its own HTTP retries). It then publishes a retry envelope to{' '}
+              <span className="font-semibold">retry-events</span> instead of enriched-events.
+            </li>
+            <li>
+              <span className="font-semibold">Errors chart</span> (sum of{' '}
+              <code className="font-mono">stream_processor_errors_total</code> labels): incremented on{' '}
+              <span className="font-semibold">unexpected exceptions</span> while handling raw-events
+              (e.g. corrupt payload) or user-updates. It is not used for the “missing user” path—that
+              path is a retry, not a counted error.
+            </li>
+            <li>
+              <span className="font-semibold">Retry worker</span> (not this chart): consumes{' '}
+              <span className="font-semibold">retry-events</span>, merges user data, and republishes with
+              exponential backoff until success or <span className="font-semibold">up to 3 attempts</span>{' '}
+              (<code className="font-mono">MAX_RETRY_ATTEMPTS</code>), then DLQ if still failing.
+            </li>
+            <li>
+              <span className="font-semibold">Idempotency</span>: duplicate raw event IDs hit Redis state
+              and increment <code className="font-mono">stream_processor_duplicate_events_total</code>.
+            </li>
+            <li>
+              <span className="font-semibold">Result service</span>: consumes{' '}
+              <span className="font-semibold">enriched-events</span> and stores outcomes (see result-service
+              metrics/API), separate from these graphs.
+            </li>
+          </ul>
+        </details>
       </div>
 
       <div className="border border-black bg-white p-3">
@@ -234,8 +270,9 @@ export function SimpleDashboard() {
                 Retries & failures (demo)
               </div>
               <p className="mt-1 text-xs text-black">
-                Simulating user failure removes user 123 from the user service so matching events
-                are routed to the retry topic. Restore puts the user back.
+                In docker compose demo, user 123 is already absent so you should see retries without
+                clicking. &quot;Simulate user failure&quot; deletes user 123 if present; &quot;Restore&quot;
+                recreates them so those events enrich again.
               </p>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button

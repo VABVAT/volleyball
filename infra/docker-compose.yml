@@ -99,6 +99,8 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       DATABASE_URL: postgresql+asyncpg://pipeline:pipeline@postgres:5432/pipeline
       LOG_LEVEL: INFO
+      # Producer still emits userId 123; without this row, stream-processor routes those to retry.
+      USER_SERVICE_DEMO_MISSING_USER_123: '1'
     ports:
     - 8080:8080
   producer:
@@ -123,6 +125,8 @@ services:
       DUPLICATE_EVERY_N: '12'
       LOG_LEVEL: INFO
       PRODUCER_ADMIN_PORT: '8010'
+      # Periodic invalid raw payload → stream_processor_errors_total (handler commits offset).
+      PRODUCER_INVALID_EVENT_EVERY_N: '200'
     ports:
     - 8010:8010
   stream-processor:

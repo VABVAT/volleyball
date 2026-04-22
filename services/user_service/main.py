@@ -106,11 +106,12 @@ async def seed_db_and_kafka() -> None:
     async with SessionLocal() as session:
         exists = (await session.execute(select(UserRow).limit(1))).first()
         if exists is None:
+            # User 123 is intentionally not seeded: the mock producer still emits userId 123 so
+            # the pipeline exercises retry-events without needing manual "simulate down".
             seed = [
                 UserRow(user_id=1, name="Alice", email="alice@example.com", tier="pro"),
                 UserRow(user_id=2, name="Bob", email="bob@example.com", tier="standard"),
                 UserRow(user_id=3, name="Carol", email="carol@example.com", tier="standard"),
-                UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro"),
             ]
             session.add_all(seed)
             await session.commit()
@@ -123,11 +124,24 @@ async def seed_db_and_kafka() -> None:
             await publish_user_update(row_to_profile(row))
 
 
+async def _demo_remove_user_123_if_configured() -> None:
+    """Strip user 123 on boot so older volumes that still have row 123 behave like a fresh demo."""
+    if os.getenv("USER_SERVICE_DEMO_MISSING_USER_123", "0").lower() not in ("1", "true", "yes"):
+        return
+    async with SessionLocal() as session:
+        row = await session.get(UserRow, 123)
+        if row is not None:
+            await session.delete(row)
+            await session.commit()
+            log.info("demo_missing_user_123_removed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("user_service_starting", kafka=settings.kafka_bootstrap_servers)
     await get_producer()
     await seed_db_and_kafka()
+    await _demo_remove_user_123_if_configured()
     yield
     global producer
     if producer:
