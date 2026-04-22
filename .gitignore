@@ -7,3 +7,5 @@ venv/
 *.jsonl
 .DS_Store
 .worktrees/
+dashboard_ui/node_modules/
+dashboard_ui/dist/
