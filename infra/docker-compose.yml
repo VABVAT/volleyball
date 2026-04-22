@@ -242,10 +242,10 @@ services:
     ports:
       - "8006:8006"
 
-  dashboard:
+  dashboard-api:
     build:
       context: ..
-      dockerfile: dashboard/Dockerfile
+      dockerfile: dashboard_api/Dockerfile
     depends_on:
       - stream-processor
       - retry-worker
@@ -258,8 +258,19 @@ services:
       METRICS_DLQ_HANDLER: http://dlq-handler:8005
       METRICS_USER_SERVICE: http://user-service:8080
       RESULT_SERVICE_URL: http://result-service:8006
+      USER_SERVICE_URL: http://user-service:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
-      - "8501:8501"
+      - "8090:8090"
+
+  dashboard-ui:
+    build:
+      context: ..
+      dockerfile: dashboard_ui/Dockerfile
+    depends_on:
+      - dashboard-api
+    ports:
+      - "8501:80"
 
 volumes:
   kafka_data:
