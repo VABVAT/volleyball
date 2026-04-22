@@ -81,9 +81,7 @@ services:
     command:
     - redis-server
     - --appendonly
-    - 'yes'
-    volumes:
-    - redis_data:/data
+    - 'no'
   user-service:
     build:
       context: ..
@@ -265,5 +263,4 @@ services:
 volumes:
   kafka_data: null
   postgres_data: null
-  redis_data: null
   dlq_data: null

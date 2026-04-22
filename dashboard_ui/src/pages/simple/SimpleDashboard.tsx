@@ -55,9 +55,12 @@ export function SimpleDashboard() {
   const enriched = enrichedTotal(current)
   const duplicates = current?.sp.raw['stream_processor_duplicate_events_total'] ?? 0
   const retryOut = current?.sp.raw['stream_processor_retry_published_total'] ?? 0
-  const errorsRaw = current?.sp.raw['stream_processor_errors_total{stage=\"raw_event\"}'] ?? 0
-  const errorsUser = current?.sp.raw['stream_processor_errors_total{stage=\"user_update\"}'] ?? 0
-  const errorsTotal = errorsRaw + errorsUser
+  const errorsTotal = useMemo(() => {
+    const raw = current?.sp.raw ?? {}
+    return Object.entries(raw)
+      .filter(([k]) => k.startsWith('stream_processor_errors_total'))
+      .reduce((acc, [, v]) => acc + (typeof v === 'number' ? v : 0), 0)
+  }, [current])
 
   const [eps, setEps] = useState<number>(20)
   const [everyN, setEveryN] = useState<number>(12)
