@@ -1,4 +1,5 @@
 import type {
+  ActivityResponse,
   CurrentMetrics,
   HealthStatus,
   RawSnapshot,
@@ -8,6 +9,7 @@ import type {
   ResultRow,
   ResultStats,
   ScenarioResult,
+  UsersSummary,
 } from './types'
 
 const BASE = '' // nginx proxies /api → dashboard-api
@@ -48,5 +50,10 @@ export const api = {
     post<ProducerSpeed>('/api/controls/producer/speed', { eps }),
   setProducerDuplicates: (every_n: number) =>
     post<ProducerDuplicates>('/api/controls/producer/duplicates', { every_n }),
+  usersSummary: () => get<UsersSummary>('/api/users/summary'),
+  activity: (limit = 200) => get<ActivityResponse>(`/api/activity?limit=${limit}`),
+  simulateRandomDeletions: (count: number) =>
+    post<ScenarioResult>('/api/scenarios/simulate-random-deletions', { count }),
+  restoreRandomDeletions: () => post<ScenarioResult>('/api/scenarios/restore-random-deletions'),
 }
 

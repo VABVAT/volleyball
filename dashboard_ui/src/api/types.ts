@@ -71,3 +71,16 @@ export interface ProducerControls {
   duplicates: ProducerDuplicates
 }
 
+export interface UsersSummary {
+  user_count: number
+  canonical_total: number
+}
+
+export interface ActivityLine {
+  ts: number
+  message: string
+}
+
+export interface ActivityResponse {
+  lines: ActivityLine[]
+}

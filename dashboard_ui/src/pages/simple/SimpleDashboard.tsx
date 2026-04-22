@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from '../../api/client'
 import { useCurrentMetrics } from '../../hooks/useCurrentMetrics'
 import { useTimeSeries } from '../../hooks/useTimeSeries'
@@ -90,6 +90,40 @@ export function SimpleDashboard() {
   const [everyN, setEveryN] = useState<number>(12)
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string>('')
+  const [userSummary, setUserSummary] = useState<{ user_count: number; canonical_total: number } | null>(
+    null,
+  )
+  const [logLines, setLogLines] = useState<{ ts: number; message: string }[]>([])
+  const [delCount, setDelCount] = useState(3)
+
+  const refreshActivity = useCallback(async () => {
+    try {
+      const r = await api.activity(250)
+      setLogLines(r.lines)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const refreshUsers = useCallback(async () => {
+    try {
+      setUserSummary(await api.usersSummary())
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshUsers()
+    const id = setInterval(() => void refreshUsers(), 12000)
+    return () => clearInterval(id)
+  }, [refreshUsers])
+
+  useEffect(() => {
+    void refreshActivity()
+    const id = setInterval(() => void refreshActivity(), 2800)
+    return () => clearInterval(id)
+  }, [refreshActivity])
 
   useEffect(() => {
     let cancelled = false
@@ -144,6 +178,8 @@ export function SimpleDashboard() {
     } finally {
       setBusy(null)
       setTimeout(() => setMsg(''), 3500)
+      void refreshActivity()
+      void refreshUsers()
     }
   }
 
@@ -160,9 +196,9 @@ export function SimpleDashboard() {
       <div className="border border-black bg-white px-3 py-2">
         <div className="text-sm font-bold text-black">Pipeline Dashboard (simple)</div>
         <div className="text-xs text-black">
-          Use <span className="font-semibold">Simulate user failure</span> to remove user 123, then
-          watch errors and retry-worker activity. <span className="font-semibold">Restore user 123</span>{' '}
-          returns normal enrichment. Refresh if you just started the stack.
+          The user service keeps <span className="font-semibold">31 canonical users</span> (ids 1–30 and
+          123); the producer samples from that pool. Use random deletion (1–5 users) or simulate-down on
+          123 to drive retries, then restore. Activity log below polls dashboard API events.
         </div>
         <details className="mt-2 border-t border-black pt-2 text-xs text-black">
           <summary className="cursor-pointer font-semibold text-black select-none">
@@ -282,17 +318,45 @@ export function SimpleDashboard() {
                 Retries & failures
               </div>
               <p className="mt-1 text-xs text-black">
-                The producer randomly includes <span className="font-semibold">userId 123</span>. After
-                simulate-down, those events error (user unavailable), route to retry, and the retry worker
-                runs up to three attempts. Restore recreates user 123 so new events enrich normally.
+                Random deletion removes 1–5 sampled users (at least 25 remain). Restore re-adds only the
+                last batch. Simulate-down targets user 123 only.
               </p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <span className="text-sm text-black">Delete count</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={delCount}
+                  onChange={(e) => setDelCount(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
+                  className="w-14 border border-black px-2 py-1 font-mono text-sm text-black"
+                />
+                <button
+                  disabled={busy !== null}
+                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                  onClick={() =>
+                    run('Random user deletions', async () => {
+                      await api.simulateRandomDeletions(delCount)
+                    })
+                  }
+                >
+                  Delete random users
+                </button>
+                <button
+                  disabled={busy !== null}
+                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                  onClick={() => run('Restore last random batch', () => api.restoreRandomDeletions())}
+                >
+                  Restore last random batch
+                </button>
+              </div>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   disabled={busy !== null}
                   className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
                   onClick={() => run('Simulate user failure', () => api.simulateDown())}
                 >
-                  Simulate user failure (retries)
+                  Simulate user failure (123)
                 </button>
                 <button
                   disabled={busy !== null}
@@ -309,10 +373,18 @@ export function SimpleDashboard() {
         {msg && <div className="mt-3 font-mono text-xs text-black">{msg}</div>}
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-4">
         <SimpleStatCard label="Enriched total" value={enriched.toFixed(0)} />
         <SimpleStatCard label="Enriched / sec (recent)" value={fmt(enrichedEpsNow, 1)} />
         <SimpleStatCard label="Enriched %" value={fmt(derived?.success_rate_pct ?? null, 1)} />
+        <SimpleStatCard
+          label="Users (DB / canonical)"
+          value={
+            userSummary
+              ? `${userSummary.user_count} / ${userSummary.canonical_total}`
+              : '—'
+          }
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
@@ -329,6 +401,30 @@ export function SimpleDashboard() {
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <SimpleLineChart title="Retry worker / sec" points={retryWorkerEpsPoints} unit="" />
         <SimpleLineChart title="Errors / sec" points={errorsEpsPoints} unit="" />
+      </div>
+
+      <div className="border border-black bg-white p-3">
+        <div className="text-sm font-semibold text-black">Activity log</div>
+        <p className="mt-1 text-xs text-black">
+          Recent dashboard API actions (producer controls, scenarios). Refreshes automatically.
+        </p>
+        <pre
+          className="mt-2 max-h-56 overflow-y-auto border border-black bg-white p-2 font-mono text-[11px] leading-snug text-black whitespace-pre-wrap"
+          aria-live="polite"
+        >
+          {logLines.length === 0
+            ? 'No activity yet.'
+            : logLines
+                .map((line) => {
+                  const t = new Date(line.ts * 1000).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  })
+                  return `${t}  ${line.message}`
+                })
+                .join('\n')}
+        </pre>
       </div>
     </div>
   )

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -18,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from redis.asyncio import Redis
-from sqlalchemy import Integer, String, select
+from sqlalchemy import Integer, String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from starlette.responses import PlainTextResponse
@@ -66,6 +67,22 @@ class UserRow(Base):
 
 producer: AIOKafkaProducer | None = None
 _redis_client: Redis | None = None
+
+# Last batch removed by /admin/simulate-random-deletions (for restore).
+last_random_deleted_user_ids: list[int] = []
+
+
+def _build_canonical_seed_rows() -> list[UserRow]:
+    """31 users: ids 1–30 plus demo user 123 (matches producer pool)."""
+    rows: list[UserRow] = []
+    for uid in range(1, 31):
+        tier = "pro" if uid % 7 == 0 else "standard"
+        rows.append(UserRow(user_id=uid, name=f"User-{uid}", email=f"user{uid}@example.com", tier=tier))
+    rows.append(UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro"))
+    return rows
+
+
+CANONICAL_USERS: dict[int, UserRow] = {r.user_id: r for r in _build_canonical_seed_rows()}
 
 HTTP_REQUESTS = Counter(
     "user_service_http_requests_total", "HTTP requests", ["method", "path", "status"]
@@ -132,10 +149,13 @@ async def seed_db_and_kafka() -> None:
         exists = (await session.execute(select(UserRow).limit(1))).first()
         if exists is None:
             seed = [
-                UserRow(user_id=1, name="Alice", email="alice@example.com", tier="pro"),
-                UserRow(user_id=2, name="Bob", email="bob@example.com", tier="standard"),
-                UserRow(user_id=3, name="Carol", email="carol@example.com", tier="standard"),
-                UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro"),
+                UserRow(
+                    user_id=uid,
+                    name=CANONICAL_USERS[uid].name,
+                    email=CANONICAL_USERS[uid].email,
+                    tier=CANONICAL_USERS[uid].tier,
+                )
+                for uid in sorted(CANONICAL_USERS.keys())
             ]
             session.add_all(seed)
             await session.commit()
@@ -148,11 +168,32 @@ async def seed_db_and_kafka() -> None:
             await publish_user_update(row_to_profile(row))
 
 
+async def ensure_minimum_seed_users() -> None:
+    """Upsert missing canonical users (e.g. DB created before we expanded to 30+ users)."""
+    added: list[int] = []
+    async with SessionLocal() as session:
+        for uid in sorted(CANONICAL_USERS.keys()):
+            tmpl = CANONICAL_USERS[uid]
+            row = await session.get(UserRow, uid)
+            if row is None:
+                session.add(UserRow(user_id=uid, name=tmpl.name, email=tmpl.email, tier=tmpl.tier))
+                added.append(uid)
+        await session.commit()
+    for uid in added:
+        async with SessionLocal() as session:
+            row = await session.get(UserRow, uid)
+            if row is not None:
+                await publish_user_update(row_to_profile(row))
+    if added:
+        log.info("ensure_seed_users_added", count=len(added), user_ids=added)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("user_service_starting", kafka=settings.kafka_bootstrap_servers)
     await get_producer()
     await seed_db_and_kafka()
+    await ensure_minimum_seed_users()
     yield
     global producer, _redis_client
     if producer:
@@ -218,6 +259,77 @@ async def upsert_user(user_id: int, body: dict[str, Any]):
         profile = row_to_profile(row)
     await publish_user_update(profile)
     return profile.model_dump(by_alias=True)
+
+
+@app.get("/admin/users-summary")
+async def users_summary():
+    async with SessionLocal() as session:
+        n = (await session.execute(select(func.count()).select_from(UserRow))).scalar_one()
+    return {"user_count": int(n), "canonical_total": len(CANONICAL_USERS)}
+
+
+@app.post("/admin/simulate-random-deletions")
+async def simulate_random_deletions(count: int = Query(3, ge=1, le=5)):
+    """Delete up to `count` random users while keeping at least 25 rows (so ≥25 remain)."""
+    global last_random_deleted_user_ids
+    async with SessionLocal() as session:
+        r = await session.execute(select(UserRow.user_id))
+        ids = list(r.scalars().all())
+    if not ids:
+        return {"ok": True, "deleted_user_ids": [], "message": "no users in database"}
+    cap = max(0, len(ids) - 25)
+    if cap < 1:
+        return {
+            "ok": True,
+            "deleted_user_ids": [],
+            "message": f"would drop below 25 users (have {len(ids)}); skip",
+        }
+    n = min(count, cap, 5)
+    picked = random.sample(ids, n)
+    async with SessionLocal() as session:
+        for uid in picked:
+            row = await session.get(UserRow, uid)
+            if row is not None:
+                await session.delete(row)
+        await session.commit()
+    for uid in picked:
+        await _invalidate_redis_user_projection(uid)
+    last_random_deleted_user_ids = list(picked)
+    log.info("random_user_deletions", user_ids=picked)
+    return {"ok": True, "deleted_user_ids": picked, "count": len(picked)}
+
+
+@app.post("/admin/restore-random-deletions")
+async def restore_random_deletions():
+    """Re-upsert users removed by the last simulate-random-deletions call."""
+    global last_random_deleted_user_ids
+    if not last_random_deleted_user_ids:
+        return {"ok": True, "restored_user_ids": [], "message": "nothing to restore"}
+    restored: list[int] = []
+    async with SessionLocal() as session:
+        for uid in last_random_deleted_user_ids:
+            tmpl = CANONICAL_USERS.get(uid)
+            if tmpl is None:
+                continue
+            row = await session.get(UserRow, uid)
+            if row is None:
+                session.add(
+                    UserRow(user_id=uid, name=tmpl.name, email=tmpl.email, tier=tmpl.tier),
+                )
+            else:
+                row.name = tmpl.name
+                row.email = tmpl.email
+                row.tier = tmpl.tier
+            restored.append(uid)
+        await session.commit()
+    for uid in restored:
+        async with SessionLocal() as session:
+            row = await session.get(UserRow, uid)
+            if row is not None:
+                await publish_user_update(row_to_profile(row))
+    last_random_deleted_user_ids = []
+    log.info("restore_random_deletions", user_ids=restored)
+    return {"ok": True, "restored_user_ids": restored, "count": len(restored)}
 
 
 @app.post("/admin/simulate-down")

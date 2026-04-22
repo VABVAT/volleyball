@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -19,7 +20,15 @@ from dashboard_api.scraper import (
     Snapshot,
     parse_prometheus_text,
 )
-from dashboard_api.scenarios import load_burst, replay_dlq, restore_user, simulate_down
+from dashboard_api.activity import append_activity, get_activity
+from dashboard_api.scenarios import (
+    load_burst,
+    random_user_deletions,
+    replay_dlq,
+    restore_random_deletions,
+    restore_user,
+    simulate_down,
+)
 
 STREAM = os.getenv("METRICS_STREAM_PROCESSOR", "http://localhost:8002")
 RETRY_SVC = os.getenv("METRICS_RETRY_WORKER", "http://localhost:8004")
@@ -169,24 +178,83 @@ async def proxy_stats():
         return r.json()
 
 
+@app.get("/api/activity")
+async def activity_feed(limit: int = Query(150, ge=10, le=500)):
+    return {"lines": await get_activity(limit)}
+
+
+@app.get("/api/users/summary")
+async def users_summary_feed():
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        r = await client.get(f"{USER_SERVICE_URL.rstrip('/')}/admin/users-summary")
+        r.raise_for_status()
+        return r.json()
+
+
 @app.post("/api/scenarios/simulate-down")
 async def scenario_simulate_down():
-    return await simulate_down(USER_SERVICE_URL)
+    try:
+        out = await simulate_down(USER_SERVICE_URL)
+        await append_activity(f"simulate-down → {json.dumps(out, default=str)[:500]}")
+        return out
+    except Exception as e:
+        await append_activity(f"simulate-down ERROR: {e!s}")
+        raise
 
 
 @app.post("/api/scenarios/restore-user")
 async def scenario_restore_user():
-    return await restore_user(USER_SERVICE_URL)
+    try:
+        out = await restore_user(USER_SERVICE_URL)
+        await append_activity(f"restore-user-123 → {json.dumps(out, default=str)[:500]}")
+        return out
+    except Exception as e:
+        await append_activity(f"restore-user ERROR: {e!s}")
+        raise
+
+
+@app.post("/api/scenarios/simulate-random-deletions")
+async def scenario_random_deletions(count: int = Query(3, ge=1, le=5)):
+    try:
+        out = await random_user_deletions(USER_SERVICE_URL, count)
+        await append_activity(f"simulate-random-deletions({count}) → {json.dumps(out, default=str)[:500]}")
+        return out
+    except Exception as e:
+        await append_activity(f"simulate-random-deletions ERROR: {e!s}")
+        raise
+
+
+@app.post("/api/scenarios/restore-random-deletions")
+async def scenario_restore_random_deletions():
+    try:
+        out = await restore_random_deletions(USER_SERVICE_URL)
+        await append_activity(f"restore-random-deletions → {json.dumps(out, default=str)[:500]}")
+        return out
+    except Exception as e:
+        await append_activity(f"restore-random-deletions ERROR: {e!s}")
+        raise
 
 
 @app.post("/api/scenarios/load-burst")
 async def scenario_load_burst(rate: int = 200, duration: int = 10):
-    return await load_burst(KAFKA, rate, duration)
+    try:
+        out = await load_burst(KAFKA, rate, duration)
+        await append_activity(f"load-burst rate={rate} duration={duration} → {json.dumps(out, default=str)[:500]}")
+        return out
+    except Exception as e:
+        await append_activity(f"load-burst ERROR: {e!s}")
+        raise
 
 
 @app.post("/api/scenarios/replay-dlq")
 async def scenario_replay_dlq(limit: int = 100):
-    return await replay_dlq(DLQ_SVC, limit)
+    try:
+        out = await replay_dlq(DLQ_SVC, limit)
+        await append_activity(f"replay-dlq limit={limit} → {json.dumps(out, default=str)[:500]}")
+        return out
+    except Exception as e:
+        await append_activity(f"replay-dlq ERROR: {e!s}")
+        raise
 
 
 @app.get("/api/health/self")
@@ -206,7 +274,10 @@ async def get_producer_controls():
 async def set_producer_speed(eps: float = Query(..., gt=0.0, le=5000.0)):
     async with httpx.AsyncClient(timeout=3.0) as client:
         r = await client.post(f"{PRODUCER_ADMIN_URL.rstrip('/')}/admin/speed", params={"eps": eps})
-        return r.json()
+        r.raise_for_status()
+        out = r.json()
+    await append_activity(f"producer speed eps={eps} → {json.dumps(out, default=str)[:300]}")
+    return out
 
 
 @app.post("/api/controls/producer/duplicates")
@@ -216,7 +287,10 @@ async def set_producer_duplicates(every_n: int = Query(..., ge=1, le=1_000_000))
             f"{PRODUCER_ADMIN_URL.rstrip('/')}/admin/duplicates",
             params={"every_n": every_n},
         )
-        return r.json()
+        r.raise_for_status()
+        out = r.json()
+    await append_activity(f"producer duplicates every_n={every_n} → {json.dumps(out, default=str)[:300]}")
+    return out
 
 
 if __name__ == "__main__":

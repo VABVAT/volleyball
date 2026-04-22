@@ -40,7 +40,7 @@ DUPLICATE_EVERY_N = int(os.getenv("DUPLICATE_EVERY_N", "15"))
 ADMIN_PORT = int(os.getenv("PRODUCER_ADMIN_PORT", "8010"))
 USE_AVRO = os.getenv("KAFKA_USE_AVRO", "0").lower() in ("1", "true", "yes")
 
-USER_IDS = [1, 2, 3, 123]
+USER_IDS = list(range(1, 31)) + [123]
 ACTIONS = ["click", "view", "purchase", "signup"]
 
 shutdown_event = asyncio.Event()
