@@ -6,3 +6,8 @@ body {
   font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
 }
 
+/* Make borders/shapes feel "sharp" by default */
+* {
+  border-radius: 0 !important;
+}
+
