@@ -40,8 +40,10 @@ export const api = {
   health: () => get<HealthStatus>('/api/health'),
   results: (limit = 50) => get<ResultRow[]>(`/api/results?limit=${limit}`),
   resultStats: () => get<ResultStats>('/api/results/stats'),
-  simulateDown: () => post<ScenarioResult>('/api/scenarios/simulate-down'),
-  restoreUser: () => post<ScenarioResult>('/api/scenarios/restore-user'),
+  deleteDemoUser: (userId: 1 | 2 | 3 | 123) =>
+    post<ScenarioResult>(`/api/scenarios/demo-users/${userId}/delete`),
+  restoreDemoUser: (userId: 1 | 2 | 3 | 123) =>
+    post<ScenarioResult>(`/api/scenarios/demo-users/${userId}/restore`),
   loadBurst: (rate = 200, duration = 10) =>
     post<ScenarioResult>('/api/scenarios/load-burst', { rate, duration }),
   replayDlq: (limit = 100) => post<ScenarioResult>('/api/scenarios/replay-dlq', { limit }),
@@ -52,8 +54,5 @@ export const api = {
     post<ProducerDuplicates>('/api/controls/producer/duplicates', { every_n }),
   usersSummary: () => get<UsersSummary>('/api/users/summary'),
   activity: (limit = 200) => get<ActivityResponse>(`/api/activity?limit=${limit}`),
-  simulateRandomDeletions: (count: number) =>
-    post<ScenarioResult>('/api/scenarios/simulate-random-deletions', { count }),
-  restoreRandomDeletions: () => post<ScenarioResult>('/api/scenarios/restore-random-deletions'),
 }
 

@@ -9,6 +9,10 @@ import type { RawSnapshot } from '../../api/types'
 /** Producer treats very large N as effectively no duplicates. */
 const DUPLICATE_OFF_EVERY_N = 1_000_000
 
+/** User-service admin allows delete/restore only for these ids. */
+const DEMO_USER_IDS = [1, 2, 3, 123] as const
+type DemoUserId = (typeof DEMO_USER_IDS)[number]
+
 function enrichedTotal(snapshot: RawSnapshot | null): number {
   return snapshot?.sp.raw['stream_processor_enriched_events_total'] ?? 0
 }
@@ -94,7 +98,6 @@ export function SimpleDashboard() {
     null,
   )
   const [logLines, setLogLines] = useState<{ ts: number; message: string }[]>([])
-  const [delCount, setDelCount] = useState(3)
 
   const refreshActivity = useCallback(async () => {
     try {
@@ -197,8 +200,9 @@ export function SimpleDashboard() {
         <div className="text-sm font-bold text-black">Pipeline Dashboard (simple)</div>
         <div className="text-xs text-black">
           The user service keeps <span className="font-semibold">31 canonical users</span> (ids 1–30 and
-          123); the producer samples from that pool. Use random deletion (1–5 users) or simulate-down on
-          123 to drive retries, then restore. Activity log below polls dashboard API events.
+          123); the producer samples from that pool. Delete users <span className="font-semibold">1, 2, 3,
+          or 123</span> to simulate missing profiles (retries/errors), then restore the same id.
+          Activity log below polls dashboard API events.
         </div>
         <details className="mt-2 border-t border-black pt-2 text-xs text-black">
           <summary className="cursor-pointer font-semibold text-black select-none">
@@ -206,8 +210,9 @@ export function SimpleDashboard() {
           </summary>
           <ul className="mt-2 list-disc space-y-1.5 pl-4">
             <li>
-              <span className="font-semibold">Simulate user failure</span> deletes user 123. Events for
-              user 123 then cannot be enriched: the stream processor increments{' '}
+              <span className="font-semibold">Delete demo user</span> (users 1, 2, 3, or 123) removes that
+              row and Redis cache. Events for that user id then cannot be enriched: the stream processor
+              increments{' '}
               <code className="font-mono">stream_processor_errors_total{'{'}stage=&quot;user_unavailable&quot;{'}'}</code>{' '}
               (counted on the <span className="font-semibold">Errors</span> chart) and publishes to{' '}
               <span className="font-semibold">retry-events</span> (also increments{' '}
@@ -318,53 +323,44 @@ export function SimpleDashboard() {
                 Retries & failures
               </div>
               <p className="mt-1 text-xs text-black">
-                Random deletion removes 1–5 sampled users (at least 25 remain). Restore re-adds only the
-                last batch. Simulate-down targets user 123 only.
+                Delete removes that user from Postgres and Redis projection. Restore re-upserts the
+                canonical row and publishes <span className="font-semibold">user-updates</span>.
               </p>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <span className="text-sm text-black">Delete count</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={5}
-                  value={delCount}
-                  onChange={(e) => setDelCount(Math.min(5, Math.max(1, Number(e.target.value) || 1)))}
-                  className="w-14 border border-black px-2 py-1 font-mono text-sm text-black"
-                />
-                <button
-                  disabled={busy !== null}
-                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-                  onClick={() =>
-                    run('Random user deletions', async () => {
-                      await api.simulateRandomDeletions(delCount)
-                    })
-                  }
-                >
-                  Delete random users
-                </button>
-                <button
-                  disabled={busy !== null}
-                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-                  onClick={() => run('Restore last random batch', () => api.restoreRandomDeletions())}
-                >
-                  Restore last random batch
-                </button>
+              <div className="mt-2 text-xs font-semibold uppercase tracking-wide text-black">Delete user</div>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {DEMO_USER_IDS.map((uid) => (
+                  <button
+                    key={`del-${uid}`}
+                    disabled={busy !== null}
+                    className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                    onClick={() =>
+                      run(`Delete user ${uid}`, async () => {
+                        await api.deleteDemoUser(uid as DemoUserId)
+                      })
+                    }
+                  >
+                    Delete {uid}
+                  </button>
+                ))}
               </div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  disabled={busy !== null}
-                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-                  onClick={() => run('Simulate user failure', () => api.simulateDown())}
-                >
-                  Simulate user failure (123)
-                </button>
-                <button
-                  disabled={busy !== null}
-                  className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
-                  onClick={() => run('Restore user 123', () => api.restoreUser())}
-                >
-                  Restore user 123
-                </button>
+              <div className="mt-3 text-xs font-semibold uppercase tracking-wide text-black">
+                Restore user
+              </div>
+              <div className="mt-1 flex flex-wrap gap-2">
+                {DEMO_USER_IDS.map((uid) => (
+                  <button
+                    key={`rst-${uid}`}
+                    disabled={busy !== null}
+                    className="border border-black bg-white px-2 py-1 text-sm font-semibold text-black disabled:opacity-50"
+                    onClick={() =>
+                      run(`Restore user ${uid}`, async () => {
+                        await api.restoreDemoUser(uid as DemoUserId)
+                      })
+                    }
+                  >
+                    Restore {uid}
+                  </button>
+                ))}
               </div>
             </div>
           </div>

@@ -52,14 +52,14 @@ export function ScenarioPanel() {
       color: 'red',
       description:
         'Deletes user 123 from the DB. Events for userId=123 will start flowing to retry → then DLQ.',
-      fn: () => api.simulateDown(),
+      fn: () => api.deleteDemoUser(123),
     },
     {
       key: 'restore',
       label: 'Restore User',
       color: 'green',
       description: 'Re-inserts user 123. Watch the retry queue drain and enriched events resume.',
-      fn: () => api.restoreUser(),
+      fn: () => api.restoreDemoUser(123),
     },
     {
       key: 'burst',

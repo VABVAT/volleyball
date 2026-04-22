@@ -10,7 +10,7 @@ from typing import Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
@@ -22,12 +22,10 @@ from dashboard_api.scraper import (
 )
 from dashboard_api.activity import append_activity, get_activity
 from dashboard_api.scenarios import (
+    delete_demo_user,
     load_burst,
-    random_user_deletions,
     replay_dlq,
-    restore_random_deletions,
-    restore_user,
-    simulate_down,
+    restore_demo_user,
 )
 
 STREAM = os.getenv("METRICS_STREAM_PROCESSOR", "http://localhost:8002")
@@ -39,6 +37,8 @@ USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8080")
 PRODUCER_ADMIN_URL = os.getenv("PRODUCER_ADMIN_URL", "http://localhost:8010")
 KAFKA = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 SCRAPE_INTERVAL = float(os.getenv("SCRAPE_INTERVAL_SEC", "2.0"))
+
+_DEMO_USER_IDS = frozenset({1, 2, 3, 123})
 
 store = MetricsStore(maxlen=300)
 
@@ -191,47 +191,29 @@ async def users_summary_feed():
         return r.json()
 
 
-@app.post("/api/scenarios/simulate-down")
-async def scenario_simulate_down():
+@app.post("/api/scenarios/demo-users/{user_id}/delete")
+async def scenario_delete_demo_user(user_id: int = Path(..., ge=1)):
+    if user_id not in _DEMO_USER_IDS:
+        raise HTTPException(status_code=400, detail="user_id must be 1, 2, 3, or 123")
     try:
-        out = await simulate_down(USER_SERVICE_URL)
-        await append_activity(f"simulate-down → {json.dumps(out, default=str)[:500]}")
+        out = await delete_demo_user(USER_SERVICE_URL, user_id)
+        await append_activity(f"delete demo user {user_id} → {json.dumps(out, default=str)[:500]}")
         return out
     except Exception as e:
-        await append_activity(f"simulate-down ERROR: {e!s}")
+        await append_activity(f"delete demo user {user_id} ERROR: {e!s}")
         raise
 
 
-@app.post("/api/scenarios/restore-user")
-async def scenario_restore_user():
+@app.post("/api/scenarios/demo-users/{user_id}/restore")
+async def scenario_restore_demo_user(user_id: int = Path(..., ge=1)):
+    if user_id not in _DEMO_USER_IDS:
+        raise HTTPException(status_code=400, detail="user_id must be 1, 2, 3, or 123")
     try:
-        out = await restore_user(USER_SERVICE_URL)
-        await append_activity(f"restore-user-123 → {json.dumps(out, default=str)[:500]}")
+        out = await restore_demo_user(USER_SERVICE_URL, user_id)
+        await append_activity(f"restore demo user {user_id} → {json.dumps(out, default=str)[:500]}")
         return out
     except Exception as e:
-        await append_activity(f"restore-user ERROR: {e!s}")
-        raise
-
-
-@app.post("/api/scenarios/simulate-random-deletions")
-async def scenario_random_deletions(count: int = Query(3, ge=1, le=5)):
-    try:
-        out = await random_user_deletions(USER_SERVICE_URL, count)
-        await append_activity(f"simulate-random-deletions({count}) → {json.dumps(out, default=str)[:500]}")
-        return out
-    except Exception as e:
-        await append_activity(f"simulate-random-deletions ERROR: {e!s}")
-        raise
-
-
-@app.post("/api/scenarios/restore-random-deletions")
-async def scenario_restore_random_deletions():
-    try:
-        out = await restore_random_deletions(USER_SERVICE_URL)
-        await append_activity(f"restore-random-deletions → {json.dumps(out, default=str)[:500]}")
-        return out
-    except Exception as e:
-        await append_activity(f"restore-random-deletions ERROR: {e!s}")
+        await append_activity(f"restore demo user {user_id} ERROR: {e!s}")
         raise
 
 

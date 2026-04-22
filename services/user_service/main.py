@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -68,10 +67,6 @@ class UserRow(Base):
 producer: AIOKafkaProducer | None = None
 _redis_client: Redis | None = None
 
-# Last batch removed by /admin/simulate-random-deletions (for restore).
-last_random_deleted_user_ids: list[int] = []
-
-
 def _build_canonical_seed_rows() -> list[UserRow]:
     """31 users: ids 1–30 plus demo user 123 (matches producer pool)."""
     rows: list[UserRow] = []
@@ -83,6 +78,9 @@ def _build_canonical_seed_rows() -> list[UserRow]:
 
 
 CANONICAL_USERS: dict[int, UserRow] = {r.user_id: r for r in _build_canonical_seed_rows()}
+
+# Dashboard demo: only these ids can be deleted/restored via admin (matches producer spotlight users).
+DEMO_USER_IDS: frozenset[int] = frozenset({1, 2, 3, 123})
 
 HTTP_REQUESTS = Counter(
     "user_service_http_requests_total", "HTTP requests", ["method", "path", "status"]
@@ -268,93 +266,49 @@ async def users_summary():
     return {"user_count": int(n), "canonical_total": len(CANONICAL_USERS)}
 
 
-@app.post("/admin/simulate-random-deletions")
-async def simulate_random_deletions(count: int = Query(3, ge=1, le=5)):
-    """Delete up to `count` random users while keeping at least 25 rows (so ≥25 remain)."""
-    global last_random_deleted_user_ids
+@app.post("/admin/demo-users/{user_id}/delete")
+async def delete_demo_user(user_id: int):
+    if user_id not in DEMO_USER_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id must be one of: 1, 2, 3, 123",
+        )
     async with SessionLocal() as session:
-        r = await session.execute(select(UserRow.user_id))
-        ids = list(r.scalars().all())
-    if not ids:
-        return {"ok": True, "deleted_user_ids": [], "message": "no users in database"}
-    cap = max(0, len(ids) - 25)
-    if cap < 1:
-        return {
-            "ok": True,
-            "deleted_user_ids": [],
-            "message": f"would drop below 25 users (have {len(ids)}); skip",
-        }
-    n = min(count, cap, 5)
-    picked = random.sample(ids, n)
-    async with SessionLocal() as session:
-        for uid in picked:
-            row = await session.get(UserRow, uid)
-            if row is not None:
-                await session.delete(row)
-        await session.commit()
-    for uid in picked:
-        await _invalidate_redis_user_projection(uid)
-    last_random_deleted_user_ids = list(picked)
-    log.info("random_user_deletions", user_ids=picked)
-    return {"ok": True, "deleted_user_ids": picked, "count": len(picked)}
-
-
-@app.post("/admin/restore-random-deletions")
-async def restore_random_deletions():
-    """Re-upsert users removed by the last simulate-random-deletions call."""
-    global last_random_deleted_user_ids
-    if not last_random_deleted_user_ids:
-        return {"ok": True, "restored_user_ids": [], "message": "nothing to restore"}
-    restored: list[int] = []
-    async with SessionLocal() as session:
-        for uid in last_random_deleted_user_ids:
-            tmpl = CANONICAL_USERS.get(uid)
-            if tmpl is None:
-                continue
-            row = await session.get(UserRow, uid)
-            if row is None:
-                session.add(
-                    UserRow(user_id=uid, name=tmpl.name, email=tmpl.email, tier=tmpl.tier),
-                )
-            else:
-                row.name = tmpl.name
-                row.email = tmpl.email
-                row.tier = tmpl.tier
-            restored.append(uid)
-        await session.commit()
-    for uid in restored:
-        async with SessionLocal() as session:
-            row = await session.get(UserRow, uid)
-            if row is not None:
-                await publish_user_update(row_to_profile(row))
-    last_random_deleted_user_ids = []
-    log.info("restore_random_deletions", user_ids=restored)
-    return {"ok": True, "restored_user_ids": restored, "count": len(restored)}
-
-
-@app.post("/admin/simulate-down")
-async def simulate_down():
-    async with SessionLocal() as session:
-        row = await session.get(UserRow, 123)
+        row = await session.get(UserRow, user_id)
         if row:
             await session.delete(row)
             await session.commit()
-    await _invalidate_redis_user_projection(123)
-    return {"ok": True, "message": "user 123 removed from database (simulate missing user)"}
+    await _invalidate_redis_user_projection(user_id)
+    log.info("demo_user_deleted", user_id=user_id)
+    return {"ok": True, "user_id": user_id, "message": f"user {user_id} removed"}
 
 
-@app.post("/admin/restore-user-123")
-async def restore_user_123():
+@app.post("/admin/demo-users/{user_id}/restore")
+async def restore_demo_user(user_id: int):
+    if user_id not in DEMO_USER_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id must be one of: 1, 2, 3, 123",
+        )
+    tmpl = CANONICAL_USERS.get(user_id)
+    if tmpl is None:
+        raise HTTPException(status_code=404, detail="unknown demo user")
     async with SessionLocal() as session:
-        row = await session.get(UserRow, 123)
+        row = await session.get(UserRow, user_id)
         if row is None:
-            row = UserRow(user_id=123, name="Demo", email="demo@example.com", tier="pro")
-            session.add(row)
+            session.add(
+                UserRow(user_id=user_id, name=tmpl.name, email=tmpl.email, tier=tmpl.tier),
+            )
         else:
-            row.name = "Demo"
-            row.email = "demo@example.com"
-            row.tier = "pro"
+            row.name = tmpl.name
+            row.email = tmpl.email
+            row.tier = tmpl.tier
         await session.commit()
+    async with SessionLocal() as session:
+        row = await session.get(UserRow, user_id)
+        if row is None:
+            raise HTTPException(status_code=500, detail="user row missing after restore")
         profile = row_to_profile(row)
     await publish_user_update(profile)
-    return {"ok": True, "user": profile.model_dump(by_alias=True)}
+    log.info("demo_user_restored", user_id=user_id)
+    return {"ok": True, "user_id": user_id, "user": profile.model_dump(by_alias=True)}

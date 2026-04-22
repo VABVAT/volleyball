@@ -10,33 +10,16 @@ import httpx
 from aiokafka import AIOKafkaProducer
 
 
-async def simulate_down(user_service_url: str) -> dict:
+async def delete_demo_user(user_service_url: str, user_id: int) -> dict:
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(f"{user_service_url.rstrip('/')}/admin/simulate-down")
+        r = await client.post(f"{user_service_url.rstrip('/')}/admin/demo-users/{user_id}/delete")
         r.raise_for_status()
         return r.json()
 
 
-async def restore_user(user_service_url: str) -> dict:
+async def restore_demo_user(user_service_url: str, user_id: int) -> dict:
     async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(f"{user_service_url.rstrip('/')}/admin/restore-user-123")
-        r.raise_for_status()
-        return r.json()
-
-
-async def random_user_deletions(user_service_url: str, count: int) -> dict:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.post(
-            f"{user_service_url.rstrip('/')}/admin/simulate-random-deletions",
-            params={"count": count},
-        )
-        r.raise_for_status()
-        return r.json()
-
-
-async def restore_random_deletions(user_service_url: str) -> dict:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.post(f"{user_service_url.rstrip('/')}/admin/restore-random-deletions")
+        r = await client.post(f"{user_service_url.rstrip('/')}/admin/demo-users/{user_id}/restore")
         r.raise_for_status()
         return r.json()
 
@@ -72,4 +55,3 @@ async def load_burst(bootstrap: str, rate: int = 200, duration_sec: int = 10) ->
     finally:
         await producer.stop()
     return {"published": n, "duration_sec": duration_sec}
-
