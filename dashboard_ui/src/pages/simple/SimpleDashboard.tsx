@@ -8,21 +8,22 @@ import { SimpleResultsTable } from '../../components/simple/SimpleResultsTable'
 import { SimpleStatCard } from '../../components/simple/SimpleStatCard'
 import type { RawSnapshot } from '../../api/types'
 
-function sumRawEventLag(snapshot: RawSnapshot | null): number {
-  if (!snapshot) return 0
+function sumRawEventLag(snapshot: RawSnapshot | null): number | null {
+  if (!snapshot) return null
   const raw = snapshot.sp.raw
   let sum = 0
+  let foundAny = false
   for (let p = 0; p < 50; p++) {
     const k1 = `stream_processor_consumer_lag_messages{partition="${p}",topic="raw-events"}`
     const k2 = `stream_processor_consumer_lag_messages{topic="raw-events",partition="${p}"}`
     const v = raw[k1] ?? raw[k2]
     if (v == null) {
-      if (p >= 3) break
       continue
     }
+    foundAny = true
     sum += v
   }
-  return sum
+  return foundAny ? sum : null
 }
 
 function enrichedTotal(snapshot: RawSnapshot | null): number {
@@ -134,7 +135,7 @@ export function SimpleDashboard() {
               <input
                 type="range"
                 min={1}
-                max={200}
+                max={1000}
                 value={eps}
                 onChange={(e) => setEps(Number(e.target.value))}
                 className="w-full"
