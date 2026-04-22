@@ -8,4 +8,5 @@ venv/
 .DS_Store
 .worktrees/
 dashboard_ui/node_modules/
+# keep dist checked out locally for Docker builds, but don't commit it
 dashboard_ui/dist/
