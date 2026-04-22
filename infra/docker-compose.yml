@@ -1,48 +1,39 @@
-# Kafka event enrichment pipeline — full stack
-# Usage: from repo root: docker compose -f infra/docker-compose.yml up --build
-
 services:
   kafka:
     image: apache/kafka:3.8.0
     ports:
-      - "9092:9092"
-      - "9094:9094"
+    - 9092:9092
+    - 9094:9094
     environment:
-      KAFKA_NODE_ID: "1"
-      KAFKA_PROCESS_ROLES: "broker,controller"
-      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094"
-      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094"
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
-      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
-      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-      KAFKA_LOG_DIRS: "/var/lib/kafka/data"
-      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     volumes:
-      - kafka_data:/var/lib/kafka/data
-
+    - kafka_data:/var/lib/kafka/data
   kafka-init:
     image: apache/kafka:3.8.0
     depends_on:
-      - kafka
-    entrypoint: ["/bin/bash", "-c"]
+    - kafka
+    entrypoint:
+    - /bin/bash
+    - -c
     command:
-      - |
-        set -e
-        echo "Waiting for Kafka..."
-        for i in $$(seq 1 60); do
-          /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 && break
-          sleep 2
-        done
-        for topic in raw-events user-updates enriched-events retry-events dead-letter-queue; do
-          /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --bootstrap-server kafka:9092 --topic $$topic --partitions 3 --replication-factor 1
-        done
-        echo "Topics ready."
-
+    - "set -e\necho \"Waiting for Kafka...\"\nfor i in $$(seq 1 60); do\n  /opt/kafka/bin/kafka-broker-api-versions.sh\
+      \ --bootstrap-server kafka:9092 && break\n  sleep 2\ndone\nfor topic in raw-events\
+      \ user-updates enriched-events retry-events dead-letter-queue; do\n  /opt/kafka/bin/kafka-topics.sh\
+      \ --create --if-not-exists --bootstrap-server kafka:9092 --topic $$topic --partitions\
+      \ 3 --replication-factor 1\ndone\necho \"Topics ready.\"\n"
   schema-registry:
     image: confluentinc/cp-schema-registry:7.7.1
     depends_on:
@@ -55,22 +46,24 @@ services:
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
     ports:
-      - "8081:8081"
+    - 8081:8081
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:8081/subjects
       interval: 10s
       timeout: 5s
       retries: 15
       start_period: 20s
-
   jaeger:
     image: jaegertracing/all-in-one:1.60
     environment:
-      COLLECTOR_OTLP_ENABLED: "true"
+      COLLECTOR_OTLP_ENABLED: 'true'
     ports:
-      - "16686:16686"
-      - "4317:4317"
-
+    - 16686:16686
+    - 4317:4317
   postgres:
     image: postgres:16-alpine
     environment:
@@ -78,18 +71,17 @@ services:
       POSTGRES_PASSWORD: pipeline
       POSTGRES_DB: pipeline
     ports:
-      - "5434:5432"
+    - 5434:5432
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-
+    - postgres_data:/var/lib/postgresql/data
   redis:
     image: redis:7.2-alpine
     ports:
-      - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis_data:/data
-
+    - 6379:6379
+    command:
+    - redis-server
+    - --appendonly
+    - 'no'
   user-service:
     build:
       context: ..
@@ -108,8 +100,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://pipeline:pipeline@postgres:5432/pipeline
       LOG_LEVEL: INFO
     ports:
-      - "8080:8080"
-
+    - 8080:8080
   producer:
     build:
       context: ..
@@ -126,12 +117,14 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      KAFKA_USE_AVRO: "1"
+      KAFKA_USE_AVRO: '1'
       OTLP_ENDPOINT: jaeger:4317
-      PRODUCER_INTERVAL_SEC: "0.15"
-      DUPLICATE_EVERY_N: "12"
+      PRODUCER_INTERVAL_SEC: '0.15'
+      DUPLICATE_EVERY_N: '12'
       LOG_LEVEL: INFO
-
+      PRODUCER_ADMIN_PORT: '8010'
+    ports:
+    - 8010:8010
   stream-processor:
     build:
       context: ..
@@ -153,16 +146,15 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379/0
       USER_SERVICE_URL: http://user-service:8080
-      METRICS_PORT: "8002"
-      USER_HTTP_RETRIES: "3"
+      METRICS_PORT: '8002'
+      USER_HTTP_RETRIES: '3'
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      KAFKA_USE_AVRO: "1"
-      KAFKA_ENABLE_TXN: "1"
+      KAFKA_USE_AVRO: '1'
+      KAFKA_ENABLE_TXN: '1'
       OTLP_ENDPOINT: jaeger:4317
       LOG_LEVEL: INFO
     ports:
-      - "8002:8002"
-
+    - 8002:8002
   retry-worker:
     build:
       context: ..
@@ -184,16 +176,15 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379/0
       USER_SERVICE_URL: http://user-service:8080
-      METRICS_PORT: "8004"
-      MAX_RETRY_ATTEMPTS: "3"
+      METRICS_PORT: '8004'
+      MAX_RETRY_ATTEMPTS: '3'
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      KAFKA_USE_AVRO: "1"
-      KAFKA_ENABLE_TXN: "1"
+      KAFKA_USE_AVRO: '1'
+      KAFKA_ENABLE_TXN: '1'
       OTLP_ENDPOINT: jaeger:4317
       LOG_LEVEL: INFO
     ports:
-      - "8004:8004"
-
+    - 8004:8004
   dlq-handler:
     build:
       context: ..
@@ -210,15 +201,14 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       REDIS_URL: redis://redis:6379/0
-      METRICS_PORT: "8005"
+      METRICS_PORT: '8005'
       DLQ_STORAGE_PATH: /data/dlq_store.jsonl
       OTLP_ENDPOINT: jaeger:4317
       LOG_LEVEL: INFO
     volumes:
-      - dlq_data:/data
+    - dlq_data:/data
     ports:
-      - "8005:8005"
-
+    - 8005:8005
   result-service:
     build:
       context: ..
@@ -236,33 +226,41 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       DATABASE_URL: postgresql+asyncpg://pipeline:pipeline@postgres:5432/pipeline
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      METRICS_PORT: "8006"
-      KAFKA_USE_AVRO: "1"
+      METRICS_PORT: '8006'
+      KAFKA_USE_AVRO: '1'
       LOG_LEVEL: INFO
     ports:
-      - "8006:8006"
-
-  dashboard:
+    - 8006:8006
+  dashboard-api:
     build:
       context: ..
-      dockerfile: dashboard/Dockerfile
+      dockerfile: dashboard_api/Dockerfile
     depends_on:
-      - stream-processor
-      - retry-worker
-      - dlq-handler
-      - user-service
-      - result-service
+    - stream-processor
+    - retry-worker
+    - dlq-handler
+    - user-service
+    - result-service
     environment:
       METRICS_STREAM_PROCESSOR: http://stream-processor:8002
       METRICS_RETRY_WORKER: http://retry-worker:8004
       METRICS_DLQ_HANDLER: http://dlq-handler:8005
       METRICS_USER_SERVICE: http://user-service:8080
       RESULT_SERVICE_URL: http://result-service:8006
+      USER_SERVICE_URL: http://user-service:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PRODUCER_ADMIN_URL: http://producer:8010
     ports:
-      - "8501:8501"
-
+    - 8090:8090
+  dashboard-ui:
+    build:
+      context: ..
+      dockerfile: dashboard_ui/Dockerfile
+    depends_on:
+    - dashboard-api
+    ports:
+    - 8501:80
 volumes:
-  kafka_data:
-  postgres_data:
-  redis_data:
-  dlq_data:
+  kafka_data: null
+  postgres_data: null
+  dlq_data: null
