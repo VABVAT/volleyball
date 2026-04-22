@@ -251,6 +251,7 @@ services:
       RESULT_SERVICE_URL: http://result-service:8006
       USER_SERVICE_URL: http://user-service:8080
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PRODUCER_ADMIN_URL: http://producer:8010
     ports:
     - 8090:8090
   dashboard-ui:

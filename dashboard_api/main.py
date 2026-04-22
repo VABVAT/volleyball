@@ -27,6 +27,7 @@ DLQ_SVC = os.getenv("METRICS_DLQ_HANDLER", "http://localhost:8005")
 USER_METRICS = os.getenv("METRICS_USER_SERVICE", "http://localhost:8080")
 RESULT = os.getenv("RESULT_SERVICE_URL", "http://localhost:8006")
 USER_SERVICE_URL = os.getenv("USER_SERVICE_URL", "http://localhost:8080")
+PRODUCER_ADMIN_URL = os.getenv("PRODUCER_ADMIN_URL", "http://localhost:8010")
 KAFKA = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 SCRAPE_INTERVAL = float(os.getenv("SCRAPE_INTERVAL_SEC", "2.0"))
 
@@ -191,6 +192,31 @@ async def scenario_replay_dlq(limit: int = 100):
 @app.get("/api/health/self")
 async def self_health():
     return {"status": "ok"}
+
+
+@app.get("/api/controls/producer")
+async def get_producer_controls():
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        speed = await client.get(f"{PRODUCER_ADMIN_URL.rstrip('/')}/admin/speed")
+        dups = await client.get(f"{PRODUCER_ADMIN_URL.rstrip('/')}/admin/duplicates")
+        return {"speed": speed.json(), "duplicates": dups.json()}
+
+
+@app.post("/api/controls/producer/speed")
+async def set_producer_speed(eps: float = Query(..., gt=0.0, le=5000.0)):
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        r = await client.post(f"{PRODUCER_ADMIN_URL.rstrip('/')}/admin/speed", params={"eps": eps})
+        return r.json()
+
+
+@app.post("/api/controls/producer/duplicates")
+async def set_producer_duplicates(every_n: int = Query(..., ge=1, le=1_000_000)):
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        r = await client.post(
+            f"{PRODUCER_ADMIN_URL.rstrip('/')}/admin/duplicates",
+            params={"every_n": every_n},
+        )
+        return r.json()
 
 
 if __name__ == "__main__":
